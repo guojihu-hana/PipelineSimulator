@@ -65,6 +65,11 @@ class PipelineScheduler:
             self.result2schedule()
             self.set_workload_schedule()
 
+        for device in self.devices:
+            workloads = device.get_initial_executable_workload(time=time)
+            for workload in workloads:
+                device.executable_workloads.push(workload)
+
     def set_model_partition_and_placement(self):
         self.layer_assignment = get_octopipe_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
         if gpc["SCHEDULE_METHOD"] in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB, Schedule.ReCycle):
