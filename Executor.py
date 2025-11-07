@@ -62,14 +62,14 @@ class Executor:
         self.reset_time()
         workloads = {}
         while self.get_time() <= time_limit and not self.finish_flag:
-            success_count = 0
+            finish_count = 0
             for pipeline in self.pipelines:
                 pipeline.check_workload_status(time=self.time)
                 self.update_constraints_across_dp(time=self.time)
                 pipeline.execute_workload(time=self.time)
                 pipeline.check_device_status(time=self.time)
-                success_count += pipeline.get_completed_workload_count()
-                if gpc["SCHEDULE_METHOD"] in (Schedule.OctoPipe, Schedule.ReCycle):
+                finish_count += pipeline.num_finished_microbatch
+                if self.dp_size > 1 and gpc["SCHEDULE_METHOD"] in (Schedule.OctoPipe, Schedule.ReCycle):
                     if self.get_time() == 0:
                         if pipeline.pipeline_idx == 0:
                             # Pop all
@@ -85,7 +85,7 @@ class Executor:
                     # if self.get_time() == 666:
                     #     if pipeline.pipeline_idx == 0:
                     #         pipeline.insert_workload(workloads=workloads,did_group=[2])
-            self.finish_flag = True if success_count == self.get_total_workload_count() else False
+            self.finish_flag = True if finish_count == self.get_total_workload_count() else False
             self.update_time()
         if show_success:
             if self.finish_flag:
@@ -141,9 +141,10 @@ if __name__ == "__main__":
     # Example
     # executor = Executor(dp_size=4, nmb_per_dp=[15, 12, 20, 17])
     # Device fail-slow or fail
-    executor = Executor(dp_size=2, nmb_per_dp=[9, 7], device_comp_power=[[2,2,2,2,2,2,2,2], [2 for _ in range(gpc["DEVICE_NUM"])]])
-    # executor = Executor(dp_size=1)
-    
+    # executor = Executor(dp_size=2, nmb_per_dp=[9, 7], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(2)])
+    dp_size = 1
+    executor = Executor(dp_size=dp_size, nmb_per_dp=[128], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(dp_size)])
+
     if gpc["PROFILE_GENERATION"]:
         profiler = cProfile.Profile()
         profiler.enable()

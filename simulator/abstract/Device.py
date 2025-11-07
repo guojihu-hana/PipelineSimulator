@@ -170,7 +170,8 @@ class Device:
         self.max_memory = max_mem
         self.comp_power = comp_power
 
-        self.workload_execute_record: list[list[Workload]] = [[] for _ in range(gpc["DEVICE_NUM"])]
+        # self.workload_execute_record: list[list[Workload]] = [[] for _ in range(gpc["DEVICE_NUM"])]
+        self.workload_execute_record = self.pipeline.workload_execute_record
 
     def get_max_mem_did(self):
         # 找到显存最大的设备
@@ -388,8 +389,8 @@ class Device:
             head_ce_workloads = []
             for workload_type in [WorkloadType.W]:
                 for mid in range(self.mid_offset, self.mid_offset + self.nmb):
-                    for stage_id in self.stages:
-                            workloads = self.stages[stage_id].workloads
+                    for sid in self.stages:
+                            workloads = self.stages[sid].workloads
                             if mid not in workloads: continue
                             if workload_type in workloads[mid] and workloads[mid][workload_type].is_executable(time=time):
                                 head_ce_workloads.append(workloads[mid][workload_type])                          
@@ -400,8 +401,8 @@ class Device:
         canceled_workload = []
         for workload_type in workload_type_order:
             for mid in range(self.bs // self.mbs):
-                for stage_id in self.stages:
-                    workloads = self.stages[stage_id].workloads
+                for sid in self.stages:
+                    workloads = self.stages[sid].workloads
                     if mid in workloads and workload_type in workloads[mid] and workloads[mid][workload_type].is_executable(time=time):
                         workload = workloads[mid][workload_type]
                         if gpc["OVERLAP_AWARE_SCHEDULE"]  and self.has_direct_dependency(time=time, workload=workload):
@@ -496,10 +497,9 @@ class Device:
     
     def get_completed_workload_count_by_type(self, wtype:WorkloadType):
         workload_num = 0
-        for workloads in self.workload_execute_record:
-            for workload in workloads:
-                if workload.wtype == wtype:
-                    workload_num += 1
+        for workload in self.workload_execute_record[self.did]:
+            if workload.wtype == wtype:
+                workload_num += 1
         return workload_num
 
     def get_executable_workload_num_by_type(self, wtype:WorkloadType):

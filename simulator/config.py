@@ -43,7 +43,7 @@ OVERLAP_AWARE_SCHEDULE = True if not HETER_DEVICE else False
 OVERLAP_AWARE_SCHEDULE = True
 # --------------------- Simulator config ---------------------
 FIND_OPTIMAL_RECOMP = False
-TIME_LIMIT = 15000
+TIME_LIMIT = 150000
 HEAD_DP = False if test_upp else False
 # [1, 2, 100, None]
 OVERLAP_DEGREE = None
@@ -301,4 +301,4 @@ if not SPLIT_BACKPROP:
 
 MAX_ACTIVATION_COUNTS = int(STAGE_NUM * 2)
 MAX_ACT = 1
-PROFILE_GENERATION = False
+PROFILE_GENERATION = True

@@ -121,7 +121,8 @@ def get_workload_duration(mid:int, sid:int, layer_wise:bool, layer_num:int, wtyp
             duration += gpc["EMB_W_TIME"]
     else:
         raise ValueError(f"Wrong workload type: {wtype}.")
-    return int(duration / comp_power) * gpc["MICRO_BATCH_TIME"][mid]
+    # return int(duration / comp_power) * gpc["MICRO_BATCH_TIME"][mid]
+    return int(duration / comp_power)
 
 class Stage:
     
@@ -268,17 +269,43 @@ class Stage:
                 self.workloads[mid][WorkloadType.W] = pgw
 
     def update_constraints_within_stage(self, time, constraint: Workload):
-        for mid in self.workloads:
-            for wlt in self.workloads[mid]:
-                self.workloads[mid][wlt].update_constraints(
-                    time,
-                    WorkloadConstraint(
-                        device_id=constraint.did,
-                        stage_id=constraint.sid, 
-                        microbatch_id=constraint.mid, 
-                        workload_type=constraint.wtype
-                    )
-                ) 
+        c_did = constraint.did
+        c_sid = constraint.sid
+        c_mid = constraint.mid
+        c_wlt = constraint.wtype
+        cstr = WorkloadConstraint(
+            device_id=c_did,
+            stage_id=c_sid, 
+            microbatch_id=c_mid, 
+            workload_type=c_wlt
+        )
+        if c_wlt == WorkloadType.F:
+            if self.sid == c_sid + 1 :
+                self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
+            elif self.sid == c_sid and self.sid == constraint.total_stages - 1:
+                self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
+        elif c_wlt == WorkloadType.B:
+            if self.sid == c_sid - 1:
+                self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
+            elif self.sid == c_sid:
+                self.workloads[c_mid][WorkloadType.W].update_constraints(time, cstr)
+        elif c_wlt == WorkloadType.R:
+            if self.sid == c_sid:
+                self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
+        else:
+            pass
+
+        # for mid in self.workloads:
+        #     for wlt in self.workloads[mid]:
+        #         self.workloads[mid][wlt].update_constraints(
+        #             time,
+        #             WorkloadConstraint(
+        #                 device_id=constraint.did,
+        #                 stage_id=constraint.sid, 
+        #                 microbatch_id=constraint.mid, 
+        #                 workload_type=constraint.wtype
+        #             )
+        #         ) 
 
     def update_memory_usage(self, workload:Workload, sim = False):
         begin_memory = self.memory_usage

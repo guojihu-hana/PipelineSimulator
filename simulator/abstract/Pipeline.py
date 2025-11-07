@@ -22,7 +22,7 @@ workload_type_mapping = {
 
 class PipelineScheduler:
 
-    def __init__(self, pipeline_idx, time=0, nmb=None, mbs=None, bs=None, mid_offset=None, placement=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+    def __init__(self, pipeline_idx, nmb, mbs, bs, time=0, mid_offset=None, placement=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
         self.executor = executor
         self.time = time
         self.mbs = mbs
@@ -34,7 +34,7 @@ class PipelineScheduler:
         self.max_mem = max_mem if max_mem else [gpc["GPU_MAX_MEM"] for _ in range(self.device_num)]
         self.layer_num = gpc["LAYER_NUM"]
         self.devices: list[Device] = []
-        self.nmb = gpc["MICRO_BATCH_NUM"] if not nmb else nmb
+        self.nmb = nmb
         self.mid_offset = pipeline_idx * self.nmb if not mid_offset else mid_offset
         
         self.placement = [] if not placement else placement
@@ -43,7 +43,7 @@ class PipelineScheduler:
         
         print(self.placement)
         self.stage_num = gpc["STAGE_NUM"]
-        self.total_workload = self.stage_num * self.device_num * self.nmb
+        self.total_workload = self.stage_num * self.nmb
         self.schedule_method = gpc["SCHEDULE_METHOD"]
         self.layer_wise = gpc["LAYERWISE"]
         self.head_dp = gpc["HEAD_DP"]
@@ -52,13 +52,13 @@ class PipelineScheduler:
         self.num_finished_microbatch = 0
         self.run_schedule = run_schedule
         self.manual_recomp_set = []
+        self.workload_execute_record: list[list[Workload]] = [[] for _ in range(self.device_num)]
         self._init_device()
         self.schedule = [[] for _ in range(self.device_num)]
         self.generate_workload_schedule()
         self.set_workload_schedule()
         self.temp_results = {}
         self.last_workload: Workload = None
-        self.workload_execute_record: list[list[Workload]] = [[] for _ in range(self.device_num)]
         if run_schedule:
             print("Read schedule generated before...")
             self.file2result()
@@ -566,7 +566,7 @@ class PipelineScheduler:
                         if self.acc_finished_mb == self.stage_num * self.nmb:
                             self.finish_flag = True 
                 self.workload_execute_record[device.current_workload.did].append(device.current_workload)
-                self.update_workload_execution_record()
+                # self.update_workload_execution_record()
 
                 device.current_workload.complete(time=time)
                 self.update_constraints_within_pipeline(time=time, constraint=device.current_workload)
