@@ -280,7 +280,7 @@ class Stage:
             workload_type=c_wlt
         )
         if c_wlt == WorkloadType.F:
-            if self.sid == c_sid + 1 :
+            if self.sid == c_sid + 1:
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
                 return self.workloads[c_mid][c_wlt]
             elif self.sid == c_sid and self.sid == constraint.total_stages - 1:

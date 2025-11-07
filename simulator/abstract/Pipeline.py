@@ -515,7 +515,7 @@ class PipelineScheduler:
             print(peak_mem_usages)
         return not oom
     
-    def update_constraints_within_pipeline(self, time, constraint):
+    def update_constraints_within_pipeline(self, time, constraint: Workload):
         for device in self.devices:
             device.update_constraints_within_device(time, constraint=constraint)
 

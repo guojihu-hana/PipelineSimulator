@@ -562,8 +562,10 @@ class Device:
             count += 1 if w.wtype == wtype else 0
         return count
 
-    def update_constraints_within_device(self, time, constraint):
+    def update_constraints_within_device(self, time, constraint: Workload):
         for sid in self.stages:
+            if constraint.mid not in self.held_mids:
+                continue
             updated_workload = self.stages[sid].update_constraints_within_stage(time, constraint=constraint)
             if updated_workload and updated_workload.is_executable(time):
                 self.executable_workloads.push(updated_workload)
