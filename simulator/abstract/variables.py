@@ -50,6 +50,57 @@ class RunMode(Enum):
     LAYERWISE_GUROBI_SOLVE = "layer"
     CHIMERA = "chimera"
 
+import heapq
+
+class OrderedQueue:
+    def __init__(self, type_order):
+        """
+        type_order: list，例如 [WorkloadType.F, WorkloadType.B, WorkloadType.W]
+        """
+        self._heap = []
+        self._counter = 0
+        self.last_type_order = type_order
+        self.type_priority = {t: i for i, t in enumerate(type_order)}
+
+    def _key(self, workload):
+        type_rank = self.type_priority.get(workload.wtype, 999)
+        return (type_rank, workload.mid, workload.sid, self._counter)
+
+    def push(self, workload):
+        key = self._key(workload)
+        heapq.heappush(self._heap, (key, workload))
+        self._counter += 1
+
+    def pop(self):
+        if not self._heap:
+            return None
+        _, workload = heapq.heappop(self._heap)
+        return workload
+
+    def peek(self):
+        if not self._heap:
+            return None
+        return self._heap[0][1]
+
+    def __len__(self):
+        return len(self._heap)
+
+    def set_type_order(self, type_order):
+        """
+        动态更新 type 排序顺序并重排堆
+        """
+        if type_order == self.last_type_order:
+            return
+        self.last_type_order = type_order
+        self.type_priority = {t: i for i, t in enumerate(type_order)}
+        # 重新构造堆
+        new_heap = []
+        for _, workload in self._heap:
+            key = self._key(workload)
+            new_heap.append((key, workload))
+        heapq.heapify(new_heap)
+        self._heap = new_heap
+
 class WorkloadConstraint:
 
     def __init__(self, 

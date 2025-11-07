@@ -387,31 +387,31 @@ class Device:
                 workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
         if gpc["SAVE_MEMORY"]:
             head_ce_workloads = []
-            for workload_type in [WorkloadType.W]:
+            for wtype in [WorkloadType.W]:
                 for mid in range(self.mid_offset, self.mid_offset + self.nmb):
                     for sid in self.stages:
                             workloads = self.stages[sid].workloads
                             if mid not in workloads: continue
-                            if workload_type in workloads[mid] and workloads[mid][workload_type].is_executable(time=time):
-                                head_ce_workloads.append(workloads[mid][workload_type])                          
+                            if wtype in workloads[mid] and workloads[mid][wtype].is_executable(time=time):
+                                head_ce_workloads.append(workloads[mid][wtype])                          
             # ensure head to be executed as quickly as possible
             executable_workoads += head_ce_workloads
 
         delayed_workload = []
         canceled_workload = []
-        for workload_type in workload_type_order:
+        for wtype in workload_type_order:
             for mid in range(self.bs // self.mbs):
                 for sid in self.stages:
                     workloads = self.stages[sid].workloads
-                    if mid in workloads and workload_type in workloads[mid] and workloads[mid][workload_type].is_executable(time=time):
-                        workload = workloads[mid][workload_type]
-                        if gpc["OVERLAP_AWARE_SCHEDULE"]  and self.has_direct_dependency(time=time, workload=workload):
+                    if mid in workloads and wtype in workloads[mid] and workloads[mid][wtype].is_executable(time=time):
+                        workload = workloads[mid][wtype]
+                        if gpc["OVERLAP_AWARE_SCHEDULE"] and self.has_direct_dependency(time=time, workload=workload):
                             if self.is_bottleneck_device():
-                                delayed_workload.append(workloads[mid][workload_type])
+                                delayed_workload.append(workloads[mid][wtype])
                             else:
-                                canceled_workload.append(workloads[mid][workload_type])
+                                canceled_workload.append(workloads[mid][wtype])
                         else:
-                            executable_workoads.append(workloads[mid][workload_type])
+                            executable_workoads.append(workloads[mid][wtype])
         executable_workoads += delayed_workload
         if len(executable_workoads) == 0:
             executable_workoads += canceled_workload
@@ -485,7 +485,9 @@ class Device:
 
     def update_constraints_within_device(self, time, constraint):
         for sid in self.stages:
-            self.stages[sid].update_constraints_within_stage(time, constraint=constraint)
+            updated_workload = self.stages[sid].update_constraints_within_stage(time, constraint=constraint)
+            if updated_workload and updated_workload.is_executable(time):
+                self.executable_workloads.append(updated_workload)
     
     def update_mid_traverse_order(self,mid=None):
         if type(self.mid_traverse_order) is not list:
@@ -548,6 +550,7 @@ class Device:
                         self.update_memory_usage()
                         self.state = Device.BUSY
                         return proc_workload
+
             elif gpc["SCHEDULE_METHOD"] == Schedule.OctoPipe and gpc["Hierarchical"]:
                 for mid in range(self.mid_offset, self.mid_offset + self.nmb):
                     for wtype in [WorkloadType.B,WorkloadType.F,WorkloadType.W,WorkloadType.R]:

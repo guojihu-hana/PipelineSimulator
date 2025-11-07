@@ -268,7 +268,7 @@ class Stage:
                     continue
                 self.workloads[mid][WorkloadType.W] = pgw
 
-    def update_constraints_within_stage(self, time, constraint: Workload):
+    def update_constraints_within_stage(self, time, constraint: Workload) -> Workload:
         c_did = constraint.did
         c_sid = constraint.sid
         c_mid = constraint.mid
@@ -282,18 +282,23 @@ class Stage:
         if c_wlt == WorkloadType.F:
             if self.sid == c_sid + 1 :
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
+                return self.workloads[c_mid][c_wlt]
             elif self.sid == c_sid and self.sid == constraint.total_stages - 1:
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
+                return self.workloads[c_mid][WorkloadType.B]
         elif c_wlt == WorkloadType.B:
             if self.sid == c_sid - 1:
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
+                return self.workloads[c_mid][c_wlt]
             elif self.sid == c_sid:
                 self.workloads[c_mid][WorkloadType.W].update_constraints(time, cstr)
+                return self.workloads[c_mid][WorkloadType.W]
         elif c_wlt == WorkloadType.R:
             if self.sid == c_sid:
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
+                return self.workloads[c_mid][WorkloadType.B]
         else:
-            pass
+            return None
 
         # for mid in self.workloads:
         #     for wlt in self.workloads[mid]:
