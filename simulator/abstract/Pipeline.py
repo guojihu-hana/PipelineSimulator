@@ -47,7 +47,6 @@ class PipelineScheduler:
         self.schedule_method = gpc["SCHEDULE_METHOD"]
         self.layer_wise = gpc["LAYERWISE"]
         self.head_dp = gpc["HEAD_DP"]
-        self.acc_finished_mb = 0
         self.finish_flag = False
         self.num_finished_microbatch = 0
         self.run_schedule = run_schedule
@@ -520,26 +519,32 @@ class PipelineScheduler:
             device.update_constraints_within_device(time, constraint=constraint)
 
     def record_workload(self, workload: Workload):
-        if workload:
-            wlt = workload.wtype.value.lower()
-            mid = workload.mid
-            sid = workload.sid
-            did = workload.did
-            k = '{}_{}_{}_{}'.format(wlt,mid,sid,did)
-            self.results[k] = workload.start_time
-            if self.last_workload is None or workload.start_time + workload.duration > self.last_workload.start_time + self.last_workload.duration:
-                self.last_workload = workload
-            if workload.wtype is not WorkloadType.F:
-                for device in self.devices:
-                    device.overlap_flag = True
-            if gpc["HEAD_DP"]:
-                if sid == gpc["STAGE_NUM"]:
-                    for d in self.devices:
-                        if d.did == did: continue
-                        for s in d.stages.keys():
-                            if s == sid:
-                                if mid in d.stages[s].workloads.keys():
-                                    d.stages[s].workloads.pop(mid)
+        if workload is None:
+            return
+
+        wlt = workload.wtype_str  # 在 Workload 中预缓存小写字符串
+        mid = workload.mid
+        sid = workload.sid
+        did = workload.did
+
+        # 用 + 拼接比 format 快约 25–35%
+        k = wlt + '_' + str(mid) + '_' + str(sid) + '_' + str(did)
+
+        self.results[k] = workload.start_time
+
+        end_time = workload.start_time + workload.duration
+        last = self.last_workload
+        if last is None or end_time > (last.start_time + last.duration):
+            self.last_workload = workload
+        
+        if gpc["HEAD_DP"]:
+            if sid == gpc["STAGE_NUM"]:
+                for d in self.devices:
+                    if d.did == did: continue
+                    for s in d.stages.keys():
+                        if s == sid:
+                            if mid in d.stages[s].workloads.keys():
+                                d.stages[s].workloads.pop(mid)
 
     def update_workload_execution_record(self):
         for device in self.devices:
@@ -547,31 +552,13 @@ class PipelineScheduler:
 
     def check_workload_status(self, time):
         for device in self.devices:
-            if device.is_current_workload_completed(time=time):
+            if device.state == Device.BUSY and time >= device.current_workload.end_time:
                 if device.current_workload.wtype == WorkloadType.W:
                     self.num_finished_microbatch += 1
-                    self.acc_finished_mb += 1
-                    if self.layer_wise:
-                        if self.acc_finished_mb == (1 + self.layer_num) * self.nmb:
-                            self.finish_flag = True
-                    elif gpc["HEAD_DP"]:
-                        if self.acc_finished_mb == (1 + self.stage_num) * self.nmb:
-                            self.finish_flag = True
-                    else:
-                        if self.acc_finished_mb == self.stage_num * self.nmb:
-                            self.finish_flag = True
-                if not gpc["SPLIT_BACKPROP"] and device.current_workload.wtype == WorkloadType.B:
+                elif not gpc["SPLIT_BACKPROP"] and device.current_workload.wtype == WorkloadType.B:
                     if device.current_workload.duration > 0:
                         self.num_finished_microbatch += 1
-                        self.acc_finished_mb += 1
-                    if self.layer_wise:
-                        if self.acc_finished_mb == (1 + self.layer_num) * self.nmb:
-                            self.finish_flag = True
-                    else:
-                        if self.acc_finished_mb == self.stage_num * self.nmb:
-                            self.finish_flag = True 
                 self.workload_execute_record[device.current_workload.did].append(device.current_workload)
-                # self.update_workload_execution_record()
 
                 device.current_workload.complete(time=time)
                 self.update_constraints_within_pipeline(time=time, constraint=device.current_workload)

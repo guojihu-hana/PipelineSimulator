@@ -392,7 +392,7 @@ class Stage:
         if mid is not None and workload_type is not None and workload_type in self.workloads[mid]:
             w = self.workloads[mid][workload_type]
             if w.execute(time=time):
-                return copy.deepcopy(w)
+                return w
         else:
             if self.stage_type == StageType.EMBD and workload_type in (WorkloadType.B, WorkloadType.W):
                 return None

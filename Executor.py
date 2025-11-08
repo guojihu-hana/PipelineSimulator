@@ -141,9 +141,9 @@ if __name__ == "__main__":
     # Example
     # executor = Executor(dp_size=4, nmb_per_dp=[15, 12, 20, 17])
     # Device fail-slow or fail
-    executor = Executor(dp_size=2, nmb_per_dp=[9, 7], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(2)])
+    # executor = Executor(dp_size=2, nmb_per_dp=[22, 27], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(2)])
     # dp_size = 1
-    # executor = Executor(dp_size=dp_size, nmb_per_dp=[128], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(dp_size)])
+    executor = Executor(dp_size=1, nmb_per_dp=[128], device_comp_power=[[2 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)])
 
     if gpc["PROFILE_GENERATION"]:
         profiler = cProfile.Profile()

@@ -603,7 +603,7 @@ class Device:
                     sid = workload.sid
                     wtype = workload.wtype
                     
-                    if CONSTRAIN_WARMUP:
+                    if gpc["CONSTRAIN_WARMUP"]:
                         if self.exe_num_f < self.begin_warmup_num:
                             if wtype != WorkloadType.F:
                                 continue
@@ -1040,13 +1040,6 @@ class Device:
         if current_mem_usage + required_memory >= max_memory - Gradient.PARAMETER:
             workload_type = WorkloadType.W
         return workload_type
-
-
-    def is_current_workload_completed(self,time) -> bool: 
-        if self.state == Device.BUSY:
-            if self.current_workload and time >= self.current_workload.end_time:
-                return True
-        return False
 
     def update_memory_usage(self) -> int:
         if self.current_workload.state == Workload.IN_PROGRESS and self.current_workload.wtype in (WorkloadType.F, WorkloadType.R, WorkloadType.B):

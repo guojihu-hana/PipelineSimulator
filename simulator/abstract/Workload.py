@@ -23,6 +23,7 @@ class Workload:
         if self.mid == 0 and self.sid == 0:
             self.ready_time = 0
         self.wtype: WorkloadType = wtype  # 工作负载类型
+        self.wtype_str = wtype.value.lower()
         self.constraints: set = set()               # {(i1, j1, C1), ...}表示Stage i1 上的Microbatch j1 的 C1 操作是前置约束
         self._generate_constraints()
 
