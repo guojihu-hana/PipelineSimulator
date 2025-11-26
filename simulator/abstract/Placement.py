@@ -208,6 +208,7 @@ class PipelinePlacement:
     def get_placements(self):
         # Sort layers by computation cost in descending order, keeping their original indices
         sorted_layers = sorted(enumerate(self.layer_computation_cost), key=lambda x: -x[1])
+        print(sorted_layers)
         # Initialize devices: memory_used, total_time, and layers list
         devices = [
             {

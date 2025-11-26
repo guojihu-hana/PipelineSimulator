@@ -111,5 +111,4 @@ def get_octopipe_predefined_partition_placement(seq_len, device_num, layer_num):
             if device_num == 4:
                 layer_assignment=[31, 33, 33, 15]
     assert sum(layer_assignment) == layer_num, f"{sum(layer_assignment)} != {layer_num}"
-    print("Return predefined model partition and model placement")
     return layer_assignment

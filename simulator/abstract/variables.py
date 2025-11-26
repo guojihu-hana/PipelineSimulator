@@ -1,13 +1,21 @@
 from enum import Enum
+from enum import IntEnum
+
 class RecomputeType(Enum):
     FULL = 1
     SELECTIVE = 2
 
-class WorkloadType(Enum):
-    F = "F"
-    B = "B"
-    W = "W"
-    R = "R"
+# class WorkloadType(Enum):
+#     F = "F"
+#     B = "B"
+#     W = "W"
+#     R = "R"
+
+class WorkloadType(IntEnum):
+    F = 1
+    B = 2
+    W = 3
+    R = 4
 
 class Placement(Enum):
     WAVELIKE = 1

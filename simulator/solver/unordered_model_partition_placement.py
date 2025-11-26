@@ -206,7 +206,6 @@ def solve_unordered(times: List[float],
     assigns, loads, mem_used = greedy_lpt_assign(times, mems, D, mem_limits)
     assigns, loads, mem_used = local_search_improve(assigns, times, mems, mem_limits, max_iters=max_iters)
     var = compute_variance(loads)
-
     assigns = sort_lists(assigns)
     return {
         "assignments": assigns,

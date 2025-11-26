@@ -1,5 +1,6 @@
 from .mutils import *
 from .context import global_context as gpc
+from .context import flush_fbw_time
 
 class Workload:
     # 定义状态常量
@@ -7,7 +8,9 @@ class Workload:
     IN_PROGRESS = 2
     COMPLETED = 3
 
-    def __init__(self, device_id:int, microbatch_id: int, stage_id: int, duration: int, total_stages:int, wtype: WorkloadType, recomp:bool, layer_idxs:list, comp_power:float):
+    def __init__(self, schedule_method, device_id:int, microbatch_id: int, stage_id: int, bwd_split: bool, duration: int, total_stages:int, wtype: WorkloadType, recomp:bool, layer_idxs:list, comp_power:float):
+        self.schedule_method = schedule_method
+        self.bwd_split = bwd_split
         self.did = device_id
         self.mid: int = microbatch_id  # 微批次编号
         self.sid: int = stage_id              # 阶段编号
@@ -23,7 +26,7 @@ class Workload:
         if self.mid == 0 and self.sid == 0:
             self.ready_time = 0
         self.wtype: WorkloadType = wtype  # 工作负载类型
-        self.wtype_str = wtype.value.lower()
+        self.wtype_str = wtype.name.lower()
         self.constraints: set = set()               # {(i1, j1, C1), ...}表示Stage i1 上的Microbatch j1 的 C1 操作是前置约束
         self._generate_constraints()
 
@@ -49,10 +52,10 @@ class Workload:
             if self.sid + 1 < self.total_stages:
                 self.constraints.add(
                     WorkloadConstraint(
-                        device_id = self.did,
+                        device_id = self.did+1,
                         stage_id = self.sid+1, 
                         microbatch_id= self.mid, 
-                        workload_type = WorkloadType.B if not (gpc['SCHEDULE_METHOD'] in (Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED) and SPLIT_BACKPROP == True) else WorkloadType.W)
+                        workload_type = WorkloadType.B if not (self.schedule_method in (Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED) and self.bwd_split == True) else WorkloadType.W)
                 )
             else:
                 self.constraints.add(

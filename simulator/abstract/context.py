@@ -99,6 +99,96 @@ class Config(dict):
 
 global_context = Config.from_file("simulator/config.py")
 
+def flush_fbw_time(bwd_split, ideal_case):
+    global global_context
+    gpc = global_context
+    gpc["F_TIME"] = 10
+    gpc["F_TIMES"] = [gpc["F_TIME"]] * gpc["LAYER_NUM"]
+    gpc["B_TIMES"] = [gpc["F_TIME"]] * gpc["LAYER_NUM"]
+    gpc["W_TIMES"] = [gpc["F_TIME"]] * gpc["LAYER_NUM"]
+
+    if not ideal_case:
+        if gpc["GEMMA"]:
+            try:
+                from data.profiled_data import profiled_data
+                ratios = profiled_data["GEMMA"][gpc["HIDDEN_SIZE"]][gpc["SEQ_LEN"]][gpc["VOCAB_SIZE"]]
+                [tf_tf, tb_tf, tw_tf, _, _, _, hf_tf, hb_tf, hw_tf] = [round(r, 1) for r in ratios]
+                gpc["B_TIMES"] = [t*(tb_tf+tw_tf) for i,t in enumerate(gpc["F_TIMES"])]
+                gpc["HEAD_F_TIME"] = gpc["F_TIME"] * hf_tf
+                gpc["HEAD_B_TIME"] = gpc["F_TIME"] * (hb_tf + hw_tf)
+                if bwd_split:
+                    gpc["B_TIMES"] = [t*tb_tf for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["W_TIMES"] = [t*tw_tf for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["HEAD_B_TIME"] = gpc["F_TIME"] * hb_tf
+                    gpc["HEAD_W_TIME"] = gpc["F_TIME"] * hw_tf
+            except:
+                print("----- No profiled data! Use predefined ratios. -----")
+
+        if gpc["DEEPSEEK"]:
+            try:
+                from data.profiled_data import profiled_data
+                ratios = profiled_data["DEEPSEEK"][gpc["HIDDEN_SIZE"]][gpc["SEQ_LEN"]][gpc["VOCAB_SIZE"]]
+                [tf_tf, tb_tf, tw_tf, mf_tf, mb_tf, mw_tf, hf_tf, hb_tf, hw_tf] = [round(r, 1) for r in ratios]
+                gpc["B_TIMES"] = [t*(mb_tf+mw_tf) if i >= gpc["LAYER_NUM"]//gpc["PP_SIZE"] - 1  else t * (tb_tf+tw_tf) for i,t in enumerate(gpc["F_TIMES"])]
+                gpc["HEAD_F_TIME"] = gpc["F_TIME"] * hw_tf
+                gpc["HEAD_B_TIME"] = gpc["F_TIME"] * (hb_tf+hw_tf)
+                if bwd_split:
+                    if tw_tf == 0:
+                        tw_tf = 0.2
+                        tb_tf -= tw_tf
+                    gpc["B_TIMES"] = [t*mb_tf if i >= gpc["LAYER_NUM"]//gpc["PP_SIZE"] - 1  else t * tb_tf for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["W_TIMES"] = [t*mw_tf if i >= gpc["LAYER_NUM"]//gpc["PP_SIZE"] - 1  else t * tw_tf for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["HEAD_B_TIME"] = gpc["F_TIME"] * hb_tf
+                    gpc["HEAD_W_TIME"] = gpc["F_TIME"] * hw_tf
+                gpc["F_TIMES"] = [t*mf_tf if i >= gpc["LAYER_NUM"]//gpc["PP_SIZE"] - 1 else t for i,t in enumerate(gpc["F_TIMES"])]
+            except:
+                print("----- No profiled data! Use predefined ratios. -----")
+
+        if gpc["NEMOTRONH"]:
+            diff = 3 * gpc["N_SCALE"]
+            try:
+                from data.profiled_data import profiled_data
+                ratios = profiled_data["NEMOTRONH"][gpc["HIDDEN_SIZE"]][gpc["SEQ_LEN"]][gpc["VOCAB_SIZE"]]
+                [tf_mf, tb_mf, tw_mf, mf_mf, mb_mf, mw_mf, hf_mf, hb_mf, hw_mf] = [round(r, 1) for r in ratios]
+                gpc["B_TIMES"] = [t*(tb_mf+tw_mf) if (i+1)%diff==0  else t * mb_mf for i,t in enumerate(gpc["F_TIMES"])]
+                gpc["HEAD_F_TIME"] = gpc["F_TIME"] * hf_mf
+                gpc["HEAD_B_TIME"] = gpc["F_TIME"] * (hb_mf + hw_mf)
+                if bwd_split:
+                    gpc["B_TIMES"] = [t*tb_mf if (i+1)%diff==0  else t * (mb_mf-0.1) for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["W_TIMES"] = [t*tw_mf if (i+1)%diff==0  else t * 0.1 for i,t in enumerate(gpc["F_TIMES"])]
+                    gpc["HEAD_B_TIME"] = gpc["F_TIME"] * hb_mf
+                    gpc["HEAD_W_TIME"] = gpc["F_TIME"] * hw_mf
+                gpc["F_TIMES"] = [t*tf_mf if (i+1)%diff==0 else t for i,t in enumerate(gpc["F_TIMES"])]
+            except:
+                print("----- No profiled data! Use predefined ratios. -----")
+
+        if gpc["VARYLEN"]:
+            diff = 12
+            from data.profiled_data import profiled_data
+            ratios = profiled_data["NEMOTRONH"][gpc["HIDDEN_SIZE"]][gpc["SEQ_LEN"]][gpc["VOCAB_SIZE"]]
+            [tf_mf, tb_mf, tw_mf, mf_mf, mb_mf, mw_mf, hf_mf, hb_mf, hw_mf] = [round(r, 1) for r in ratios]
+            gpc["B_TIMES"] = [t*(tb_mf+tw_mf) if (i+1)%diff==0  else t * mb_mf for i,t in enumerate(gpc["F_TIMES"])]
+            gpc["HEAD_F_TIME"] = gpc["F_TIME"] * hf_mf
+            gpc["HEAD_B_TIME"] = gpc["F_TIME"] * (hb_mf + hw_mf)
+            if bwd_split:
+                gpc["B_TIMES"] = [t*tb_mf if (i+1)%diff==0  else t * (mb_mf-0.1) for i,t in enumerate(gpc["F_TIMES"])]
+                gpc["W_TIMES"] = [t*tw_mf if (i+1)%diff==0  else t * 0.1 for i,t in enumerate(gpc["F_TIMES"])]
+                gpc["HEAD_B_TIME"] = gpc["F_TIME"] * hb_mf
+                gpc["HEAD_W_TIME"] = gpc["F_TIME"] * hw_mf
+            gpc["F_TIMES"] = [t*tf_mf if (i+1)%diff==0 else t for i,t in enumerate(gpc["F_TIMES"])]
+            print("------ Test vary length sequence. -----")
+    # print(gpc["F_TIMES"],gpc["B_TIMES"],gpc["W_TIMES"])
+    else:
+        gpc["EMB_F_TIME"] = 0
+        gpc["EMB_B_TIME"] = 0
+        gpc["EMB_W_TIME"] = 0
+        gpc["HEAD_F_TIME"] = 10
+        gpc["HEAD_B_TIME"] = 2
+        gpc["HEAD_W_TIME"] = 2
+        gpc["CE_F_TIME"] = 0
+        gpc["CE_B_TIME"] = 0
+        gpc["CE_W_TIME"] = 0
+
 if __name__ == "__main__":
     c = Config()
     c = Config.from_file("simulator/config.py")

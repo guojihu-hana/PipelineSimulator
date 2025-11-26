@@ -129,7 +129,7 @@ class SchedulingPainter:
                 max_key = k
                 canvas_width = data[k] + length + 2 * self._pp_align
 
-        _, max_key_sid, _, did = parse_microbatch_key(max_key)
+        wtype, max_key_sid, _, did = parse_microbatch_key(max_key)
         # max_key_sid %= self._device_num
         max_key_pid = did // self._stage_num
         # canvas_width = data[k] + self._backward_b_length[max_key_pid] + 2 * self._pp_align
@@ -141,9 +141,9 @@ class SchedulingPainter:
         y_label = (0 + 30) // 2 + 5
 
         if self._max_time == -1:
-            if SPLIT_BACKPROP:
+            if wtype == 'w':
                 self._max_time = (data[max_key] + self._backward_w_length[max_key_sid])//self._pixel_base
-            else:
+            elif wtype == 'b':
                 self._max_time = (data[max_key] + self._backward_b_length[max_key_sid])//self._pixel_base
 
         label_canvas.create_text(self._pp_align + 145, y_label, text="MinExeTime:{}, Chunk:{}, C:{}".format(
@@ -377,11 +377,11 @@ class MultiPipelinePainter:
         label_canvas = tk.Canvas(self._tk_root, width=canvas_width, height=30)
         y_label = (0 + 30) // 2 + 5
 
-        _, max_key_pid, max_key_mid, _ = parse_microbatch_key(max_key)
+        wtype, max_key_pid, max_key_mid, _ = parse_microbatch_key(max_key)
         if self._max_time == -1:
-            if SPLIT_BACKPROP:
+            if wtype == 'w':
                 self._max_time = (all_dp_data[max_dp_idx][max_key] + self._backward_w_length[max_key_pid][max_key_mid])//self._pixel_base
-            else:
+            elif wtype == 'b':
                 self._max_time = (all_dp_data[max_dp_idx][max_key] + self._backward_b_length[max_key_pid][max_key_mid])//self._pixel_base
 
         label_canvas.create_text(self._pp_align + 145, y_label, text="Time:{}, Chunk:{}".format(
@@ -391,8 +391,12 @@ class MultiPipelinePainter:
         )
 
         coords_label = label_canvas.create_text(
-            canvas_width - self._pp_align - 120, y_label, text="BlockCoords:(start,end)"
+            self._pp_align + 145 + 200, y_label, text="BlockCoords:(start,end)"
         )
+        coords_label1 = label_canvas.create_text(
+            canvas_width - 200, y_label, text="BlockCoords:(start,end)"
+        )
+
         label_canvas.pack()
         
         # 2. Add timeline for each pipeline
@@ -466,6 +470,7 @@ class MultiPipelinePainter:
                 # 求余考虑virtual stage的情况
                 self._item2mid[block] = mid
 
+            save_to_file(f"schedule_results/result.txt", schedule_res_content, 'w')
             save_to_file(f"schedule_results/MultiPipeline/DP{dp_idx}/result.txt", schedule_res_content, 'w')
 
         # Register hook for highlighting execution block of this microbatch
@@ -487,6 +492,9 @@ class MultiPipelinePainter:
             step = self._item2step[current_item]
             label_canvas.itemconfig(
                 coords_label, text=f"Step {step} ({current_start},{current_end})"
+            )
+            label_canvas.itemconfig(
+                coords_label1, text=f"Step {step} ({current_start},{current_end})"
             )
 
             tags = [

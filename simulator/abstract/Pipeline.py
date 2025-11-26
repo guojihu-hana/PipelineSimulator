@@ -22,8 +22,11 @@ workload_type_mapping = {
 
 class PipelineScheduler:
 
-    def __init__(self, pipeline_idx, nmb, mbs, bs, time=0, mid_offset=None, placement=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+    def __init__(self, schedule_method, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, time=0, mid_offset=None, placement=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+        self.schedule_method = schedule_method
+        self.bwd_split = bwd_split
         self.executor = executor
+        self.chunk_num = chunk_num
         self.time = time
         self.mbs = mbs
         self.bs = bs
@@ -36,15 +39,15 @@ class PipelineScheduler:
         self.devices: list[Device] = []
         self.nmb = nmb
         self.mid_offset = pipeline_idx * self.nmb if not mid_offset else mid_offset
+        self.solver_results = None
         
         self.placement = [] if not placement else placement
-        self.layer_assignment = []
-        self.set_model_partition_and_placement()
-        
-        print(self.placement)
-        self.stage_num = gpc["STAGE_NUM"]
+        self.partition = [] if not placement else [len(p) for p in self.placement]
+        self.stage_num = self.device_num * self.chunk_num
+        if not self.placement:
+            print("Use heuristic model partition and placement.")
+            self.set_model_partition_and_placement()
         self.total_workload = self.stage_num * self.nmb
-        self.schedule_method = gpc["SCHEDULE_METHOD"]
         self.layer_wise = gpc["LAYERWISE"]
         self.head_dp = gpc["HEAD_DP"]
         self.finish_flag = False
@@ -70,21 +73,21 @@ class PipelineScheduler:
                 device.executable_workloads.push(workload)
 
     def set_model_partition_and_placement(self):
-        self.layer_assignment = get_octopipe_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
-        if gpc["SCHEDULE_METHOD"] in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB, Schedule.ReCycle):
-            self.layer_assignment = [self.layer_num // self.device_num] * self.device_num
-        if gpc["SCHEDULE_METHOD"] == Schedule.Mist:
-            self.layer_assignment = get_mist_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
-            gpc["SCHEDULE_METHOD"] = Schedule.STANDARD_1F1B
+        self.partition = get_octopipe_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
+        if self.schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB, Schedule.ReCycle):
+            self.partition = [self.layer_num // self.device_num] * self.device_num
+        if self.schedule_method == Schedule.Mist:
+            self.partition = get_mist_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
+            self.schedule_method = Schedule.STANDARD_1F1B
         
         self.placement = [
-            [1 for _ in range(layer_num)] for layer_num in self.layer_assignment
+            [1 for _ in range(layer_num)] for layer_num in self.partition
         ]
 
-        if gpc["SCHEDULE_METHOD"] == Schedule.OctoPipe:
-            computation_times = [f + b + w for f, b, w in zip(F_TIMES, B_TIMES, W_TIMES)]
-            computation_times[-1] += HEAD_F_TIME + HEAD_B_TIME + HEAD_W_TIME
-            if gpc["STAGE_NUM"] == self.layer_num:
+        if self.schedule_method == Schedule.OctoPipe:
+            computation_times = [f + b + w for f, b, w in zip(gpc["F_TIMES"], gpc["B_TIMES"], gpc["W_TIMES"])]
+            computation_times[-1] += gpc["HEAD_F_TIME"] + gpc["HEAD_B_TIME"] + gpc["HEAD_W_TIME"]
+            if self.stage_num == self.layer_num:
                 solver_results = solve_unordered(
                     times=computation_times, 
                     D=self.device_num,
@@ -98,11 +101,12 @@ class PipelineScheduler:
                     mems=[1 for _ in range(self.layer_num)], 
                     mem_limits=[144 for _ in range(self.device_num)]
                 )
+            self.solver_results = solver_results
             self.placement = solver_results["assignments"]
-            self.layer_assignment = [len(p) for p in self.placement]
+            self.partition = [len(p) for p in self.placement]
 
         with open("schedule_results/partition.txt", 'w') as f:
-            f.write(str(self.layer_assignment))
+            f.write(str(self.partition))
             f.flush()
 
     def sid2did(self, sid):
@@ -165,8 +169,12 @@ class PipelineScheduler:
         layer_num = self.layer_num // self.stage_num
         for did in range(self.device_num):
             device = Device(
+                        schedule_method=self.schedule_method,
+                        bwd_split = self.bwd_split,
                         did=did,
                         nmb=self.nmb,
+                        chunk_num=self.chunk_num,
+                        stage_num=self.stage_num,
                         mid_offset=self.mid_offset,
                         mbs=self.mbs,
                         bs=self.bs,
@@ -176,8 +184,8 @@ class PipelineScheduler:
                     )
             self.devices.append(device)
         self.set_recomputation_config()
-        if not self.placement and self.schedule_method not in (Schedule.STANDARD_INTERLEAVED, Schedule.STANDARD_1F1B, Schedule.ZBV, Schedule.STANDARD_ZBH):
-            layer_computation_cost = [F_TIMES[i]+B_TIMES[i]+W_TIMES[i] for i in range(self.layer_num)]
+        if self.stage_num == self.layer_num and self.schedule_method == Schedule.OctoPipe:
+            layer_computation_cost = [gpc["F_TIMES"][i]+gpc["B_TIMES"][i]+gpc["W_TIMES"][i] for i in range(self.layer_num)]
             head_total = gpc["HEAD_F_TIME"] + gpc["HEAD_B_TIME"] + gpc["HEAD_W_TIME"]
             ce_total = gpc["CE_F_TIME"] + gpc["CE_B_TIME"] + gpc["CE_W_TIME"]
             layer_computation_cost[-1] += head_total + ce_total
@@ -186,7 +194,7 @@ class PipelineScheduler:
                 layer_num=total_layer,
                 layer_computation_cost=layer_computation_cost,
                 layer_para=[1 for _ in range(total_layer)],
-                chunk_num=gpc["CHUNK_NUM"],
+                chunk_num=self.chunk_num,
                 dev_num=self.device_num,
                 dev_max_memory=[100000 for _ in range(total_layer)],
                 dev_compute_power=self.comp_power,
@@ -199,7 +207,7 @@ class PipelineScheduler:
             for did in range(self.device_num):
                 self.devices[did].add_stage(did, layer_num = len(self.placement[did]), layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
                 layer_idx_start += len(self.placement[did])
-        elif self.placement and self.schedule_method == Schedule.OctoPipe and CHUNK_NUM == 1:
+        elif self.placement and self.schedule_method == Schedule.OctoPipe and self.chunk_num == 1:
             layer_idx_start = 0
             for did in range(self.device_num):
                 self.devices[did].add_stage(did, layer_num = len(self.placement[did]), layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
@@ -313,6 +321,8 @@ class PipelineScheduler:
         for did in range(self.device_num):
             self.placement.append(list(self.devices[did].stages.keys()))
 
+        # print(self.placement)
+
         save_to_file(gpc["TEMP_PLA_PATH"], str(self.placement), 'w')
         save_to_file(gpc["PLA_FILE_PATH"], str(self.placement), 'w')
 
@@ -329,23 +339,24 @@ class PipelineScheduler:
     def generate_workload_schedule(self):
         if self.schedule_method == Schedule.STANDARD_1F1B:
             self.generate_1f1b_schedule()
-            print("Generate 1F1B Schedule.")
+            # print("Generate 1F1B Schedule.")
         elif self.schedule_method == Schedule.STANDARD_AFAB:
             self.generate_afab_schedule()
-            print("Generate AFAB Schedule.")
+            # print("Generate AFAB Schedule.")
         elif self.schedule_method == Schedule.STANDARD_ZBH:
             self.generate_zbh_schedule()
-            print("Generate ZBH Schedule.")
+            # print("Generate ZBH Schedule.")
         elif self.schedule_method == Schedule.STANDARD_INTERLEAVED:
             self.generate_interleaved_1f1b_schedule()
-            print("Generate I-1F1B Schedule.")
+            # print("Generate I-1F1B Schedule.")
         else:
-            print(f"Generate {SCHEDULE_METHOD.name} Schedule.")
+            # print(f"Generate {self.schedule_method.name} Schedule.")
+            pass
 
     def generate_afab_schedule(self):
-        assert gpc["CHUNK_NUM"] == 1
+        assert self.chunk_num == 1
         workload_type_order = [WorkloadType.F, WorkloadType.B]
-        if gpc["SPLIT_BACKPROP"]:
+        if self.bwd_split:
             workload_type_order.append(WorkloadType.W)
         workload_type_num = len(workload_type_order)
         mid_offset = self.mid_offset
@@ -357,8 +368,8 @@ class PipelineScheduler:
                     mids[i]+=1
 
     def generate_1f1b_schedule(self):
-        assert gpc["CHUNK_NUM"] == 1
-        workload_type_order = [WorkloadType.B, WorkloadType.W, WorkloadType.F] if gpc["SPLIT_BACKPROP"] else [WorkloadType.B, WorkloadType.F]
+        assert self.chunk_num == 1
+        workload_type_order = [WorkloadType.B, WorkloadType.W, WorkloadType.F] if self.bwd_split else [WorkloadType.B, WorkloadType.F]
         workload_type_num = len(workload_type_order)
         workload_idx_in_mids = {WorkloadType.F: 0, WorkloadType.B : 1, WorkloadType.W : 2}
         mid_offset = self.mid_offset
@@ -382,7 +393,7 @@ class PipelineScheduler:
                 iter+=1
 
     def generate_zbh_schedule(self):
-        assert gpc["SPLIT_BACKPROP"]
+        assert self.bwd_split
 
         workload_type_order = [WorkloadType.B, WorkloadType.W, WorkloadType.F]
         workload_type_num = len(workload_type_order)
@@ -402,7 +413,7 @@ class PipelineScheduler:
             while sum(finish_flag) < workload_type_num:
                 next_workload_type = workload_type_order[iter % workload_type_num]
                 next_mid = mids[workload_idx_in_mids[next_workload_type]]
-                if mids[0] < min(self.nmb, gpc["STAGE_NUM"] * gpc["MAX_ACT"]):
+                if mids[0] < min(self.nmb, self.stage_num * gpc["MAX_ACT"]):
                     if next_workload_type == WorkloadType.W:
                         iter += 1
                         continue 
@@ -419,14 +430,14 @@ class PipelineScheduler:
         for did in range(self.device_num):
             sids = list(self.placement[did])
             
-            mids = [0 for _ in range(workload_type_num * gpc["CHUNK_NUM"])]
+            mids = [0 for _ in range(workload_type_num * self.chunk_num)]
             f_mid_count = 0
             
             f_next_sid_idx = 0
             f_next_sid = sids[f_next_sid_idx]
             idx_in_f_mids = f_next_sid_idx * workload_type_num
         
-            warmup_f_num = (gpc["CHUNK_NUM"] - 1) * self.device_num + (self.device_num - did - 1) * 2
+            warmup_f_num = (self.chunk_num - 1) * self.device_num + (self.device_num - did - 1) * 2
             while mids[idx_in_f_mids] < self.nmb and f_mid_count < warmup_f_num:
                 self.schedule[did].append((WorkloadType.F ,mids[idx_in_f_mids] + mid_offset, f_next_sid))
                 mids[idx_in_f_mids] += 1
@@ -444,7 +455,7 @@ class PipelineScheduler:
 
             # Start 1f1b with F operation
             operation_flag = 'f'
-            while b_mid_count + f_mid_count < self.nmb * gpc["CHUNK_NUM"] * workload_type_num:
+            while b_mid_count + f_mid_count < self.nmb * self.chunk_num * workload_type_num:
                 if operation_flag == 'f':
                     if mids[idx_in_f_mids] < self.nmb:
                         self.schedule[did].append((WorkloadType.F ,mids[idx_in_f_mids] + mid_offset, f_next_sid))
@@ -460,7 +471,7 @@ class PipelineScheduler:
                         if gpc["RECOMP"]:
                             self.schedule[did].append((WorkloadType.R ,mids[idx_in_b_mids] + mid_offset, b_next_sid))
                         self.schedule[did].append((WorkloadType.B ,mids[idx_in_b_mids] + mid_offset, b_next_sid))
-                        if gpc["SPLIT_BACKPROP"]:
+                        if self.bwd_split:
                             self.schedule[did].append((WorkloadType.W ,mids[idx_in_b_mids] + mid_offset, b_next_sid))
                         mids[idx_in_b_mids] += 1
                         b_mid_count += 1
@@ -471,7 +482,14 @@ class PipelineScheduler:
                     operation_flag = 'f'
                 else:
                     raise("UNKOWN OPERATION FLAG")
-    
+        # self.print_schedule()
+
+    def print_schedule(self):
+        for s in self.schedule:
+            for w in s:
+                print(f"{w[0].name}{w[1]}", end=" ")
+            print()
+
     def print_stages(self):
         for device in self.devices:
             print("Device ID:{}".format(device.did))
@@ -482,13 +500,39 @@ class PipelineScheduler:
         for k in self.results:
             print(k, self.results[k])
 
-    def print_device_utilization(self):
+    def get_device_execution_time(self):
+        res = [
+            device.finish_time for device in self.devices
+        ]
+        return res
+
+    def get_device_bubble_time(self):
+        res = [
+            device.idle_time for device in self.devices
+        ]
+        return res
+
+    def get_model_partition(self):
+        return self.partition
+    
+    def get_model_placement(self):
+        return self.placement
+    
+    def print_partition_placement(self):
+        for did, p in enumerate(self.placement):
+            print(f"Device {did} has {len(p)} layers, {p}")
+        if self.solver_results:
+            print(f"Workloads on each Device:{self.solver_results['loads']}, var:{self.solver_results['variance']}")
+            print(f"Layer assignments:{self.solver_results['assignments']}")
+
+    def print_device_utilization(self, total_time):
         avg_bubble = 0
+        bubble_ratios = []
         for device in self.devices:
-            bubble_ratio = round(device.idle_time / self.get_time(), 4)
-            print(f"Device {device.did} idle time : {device.idle_time}, idle ratio: {bubble_ratio*100}")
+            bubble_ratio = round(device.idle_time / total_time, 4)
+            bubble_ratios.append(round(bubble_ratio*100,2))
             avg_bubble += bubble_ratio
-        print(f"Avg bubble ratio: {avg_bubble/len(self.devices)*100}")
+        print(f"{self.schedule_method.name}:\tTime = {total_time}\t Avg bubble ratio = {round(avg_bubble/len(self.devices)*100,2)}\tDevice bubble ratios = {bubble_ratios} ")
 
     def print_memory_footprint(self, device_id=(0,), show_mem=True):
         peak_mem_usages = [0 for _ in range(len(self.devices))]
@@ -536,9 +580,9 @@ class PipelineScheduler:
         last = self.last_workload
         if last is None or end_time > (last.start_time + last.duration):
             self.last_workload = workload
-        
+
         if gpc["HEAD_DP"]:
-            if sid == gpc["STAGE_NUM"]:
+            if sid == self.stage_num:
                 for d in self.devices:
                     if d.did == did: continue
                     for s in d.stages.keys():
@@ -555,12 +599,13 @@ class PipelineScheduler:
             if device.state == Device.BUSY and time >= device.current_workload.end_time:
                 if device.current_workload.wtype == WorkloadType.W:
                     self.num_finished_microbatch += 1
-                elif not gpc["SPLIT_BACKPROP"] and device.current_workload.wtype == WorkloadType.B:
+                elif not self.bwd_split and device.current_workload.wtype == WorkloadType.B:
                     if device.current_workload.duration > 0:
                         self.num_finished_microbatch += 1
                 self.workload_execute_record[device.current_workload.did].append(device.current_workload)
 
                 device.current_workload.complete(time=time)
+                device.finish_time = time
                 self.update_constraints_within_pipeline(time=time, constraint=device.current_workload)
                 device.update_memory_usage()
                 device.state = Device.IDLE
@@ -589,7 +634,7 @@ class PipelineScheduler:
         # NOTE: Add missed finished cases caused by transferring micro-batches to other pipelines
         if time > 0 and not self.finish_flag and idle_num == len(self.devices):
             self.finish_flag = True
-            print(f"{time}: All devices are idle, set pipeline {self.pipeline_idx} as finished.")
+            # print(f"{time}: All devices are idle, set pipeline {self.pipeline_idx} as finished.")
 
     def run_pipeline_parallelism(self, time_limit = gpc["TIME_LIMIT"], show_utilization=True, show_mem=True, show_success=True):
         # self.run_schedule = False
@@ -671,7 +716,10 @@ class PipelineScheduler:
                     if mid not in device.stages[sid].workloads: continue
                     f_times[sid][mid] = device.stages[sid].workloads[mid][WorkloadType.F].duration
                     b_times[sid][mid] = device.stages[sid].workloads[mid][WorkloadType.B].duration
-                    w_times[sid][mid] = device.stages[sid].workloads[mid][WorkloadType.W].duration
+                    if self.bwd_split:
+                        w_times[sid][mid] = device.stages[sid].workloads[mid][WorkloadType.W].duration
+                    else:
+                        w_times[sid][mid] = 0
         return f_times, b_times, w_times
          
     def draw(self) -> None:

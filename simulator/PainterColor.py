@@ -31,10 +31,6 @@ def set_color(sid, workload_type, layer_num, layer_wise = LAYERWISE):
         color = "#B0E8D3"
     elif workload_type == 'r':
         color = "#F8CECC"
-    
-    if gpc["HEAD_DP"]:
-        if sid == gpc["STAGE_NUM"]:
-            color = "#E1D5E7" # 紫色: #E1D5E7
 
     if RUN_MODE == RunMode.LAYERWISE_GUROBI_SOLVE or layer_wise:
         if sid == 0:

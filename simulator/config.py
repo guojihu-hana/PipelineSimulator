@@ -19,22 +19,22 @@ SCHEDULE_METHOD = Schedule.STANDARD_1F1B
 # SCHEDULE_METHOD = Schedule.STANDARD_INTERLEAVED
 # SCHEDULE_METHOD = Schedule.STANDARD_ZBH
 # SCHEDULE_METHOD = Schedule.Mist
-SCHEDULE_METHOD = Schedule.OctoPipe
+# SCHEDULE_METHOD = Schedule.OctoPipe
 
 # SCHEDULE_METHOD = Schedule.ZBV
 # SCHEDULE_METHOD = Schedule.STANDARD_AFAB
 STAGE_PLACEMENT = Placement.INTERLEAVED
 # STAGE_PLACEMENT = Placement.SEARCHED
 # STAGE_PLACEMENT = Placement.WAVELIKE
-SPLIT_BACKPROP = True
+SPLIT_BACKPROP = False
 if SCHEDULE_METHOD == Schedule.STANDARD_INTERLEAVED:
     STAGE_PLACEMENT = Placement.INTERLEAVED
     CHUNK_NUM = LAYER_NUM // DEVICE_NUM
-    SPLIT_BACKPROP = False
+
 if SCHEDULE_METHOD in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB):
     CHUNK_NUM = 1
 # --------------------- Solver config ---------------------
-Hierarchical = True
+Hierarchical = False
 test_upp = True if SCHEDULE_METHOD == Schedule.OctoPipe else False
 HETER_DEVICE = True
 HETER_RATIO = 1
@@ -67,10 +67,8 @@ W_TIME = 0
 COMM_TIME = 0
 
 
-if SCHEDULE_METHOD in (Schedule.STANDARD_ZBH, Schedule.ZBV):
-    SPLIT_BACKPROP = True
-    if SCHEDULE_METHOD == Schedule.ZBV:
-        STAGE_PLACEMENT = Placement.WAVELIKE
+if SCHEDULE_METHOD == Schedule.ZBV:
+    STAGE_PLACEMENT = Placement.WAVELIKE
 
 if SPLIT_BACKPROP:
     EMB_B_TIME = 0
@@ -168,7 +166,6 @@ if not IDEAL_SITUATION:
             from data.profiled_data import profiled_data
             ratios = profiled_data["NEMOTRONH"][HIDDEN_SIZE][SEQ_LEN][VOCAB_SIZE]
             [tf_mf, tb_mf, tw_mf, mf_mf, mb_mf, mw_mf, hf_mf, hb_mf, hw_mf] = [round(r, 1) for r in ratios]
-            print(hf_mf,hb_mf,hw_mf)
             B_TIMES = [t*(tb_mf+tw_mf) if (i+1)%diff==0  else t * mb_mf for i,t in enumerate(F_TIMES)]
             HEAD_F_TIME = F_TIME * hf_mf
             HEAD_B_TIME = F_TIME * (hb_mf + hw_mf)
@@ -301,4 +298,4 @@ if not SPLIT_BACKPROP:
 
 MAX_ACTIVATION_COUNTS = int(STAGE_NUM * 2)
 MAX_ACT = 1
-PROFILE_GENERATION = True
+PROFILE_GENERATION = False
