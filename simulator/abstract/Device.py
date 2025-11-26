@@ -887,8 +887,6 @@ class Device:
                     self.next_workload_idx += 1
                     return proc_workload
             elif run_schedule or self.schedule_method == Schedule.STANDARD_1F1B:
-                if self.next_workload_idx == len(self.stages) * self.nmb * gpc["WORKLOAD_TYPE_NUM"]:
-                    return None
                 if self.next_workload_idx == len(self.static_schedule):
                     return None
                 try:

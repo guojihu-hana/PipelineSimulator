@@ -21,7 +21,6 @@ class Executor:
         self.mid_offsets    = [0] + [sum(self.nmb_per_dp[:i]) for i in range(1, dp_size+1)]
         self.micro_batch_size = gpc["MICRO_BATCH_SIZE"]
         self.batch_size = sum(self.nmb_per_dp) * self.micro_batch_size
-        self._init_pipelines()
         self.best_pipelines = None
 
     def _init_pipelines(self, placement = None):
@@ -178,6 +177,7 @@ class Executor:
 
     def run_all_dp(self, time_limit = gpc["TIME_LIMIT"], show_utilization=True, show_mem=True, show_success=True, show_partition=True, show_placement=True):
         self.reset_time()
+        self._init_pipelines()
         workloads = {}
         while self.get_time() <= time_limit and not self.finish_flag:
             finish_count = 0
@@ -264,19 +264,23 @@ if __name__ == "__main__":
     chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
     chunk_num = 1
     schedule_method = Schedule.OctoPipe
+    schedule_method = Schedule.STANDARD_1F1B
     bwd_split = True
-    executor = Executor(dp_size=1, nmb_per_dp=[64], chunk_num=chunk_num, schedule_method=schedule_method, bwd_split=bwd_split, device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)])
+    executor = Executor(dp_size=1, nmb_per_dp=[4], chunk_num=chunk_num, schedule_method=schedule_method, bwd_split=bwd_split, device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)])
     
-    if gpc["PROFILE_GENERATION"]:
-        profiler = cProfile.Profile()
-        profiler.enable()
-        executor.iterative_tuning(iter_limit=100)
-        profiler.disable()
+    if schedule_method == Schedule.OctoPipe:
+        if gpc["PROFILE_GENERATION"]:
+            profiler = cProfile.Profile()
+            profiler.enable()
+            executor.iterative_tuning(iter_limit=100)
+            profiler.disable()
 
-        stats = pstats.Stats(profiler).sort_stats("cumtime")
-        stats.print_stats(20)  # 打印前 10 个耗时函数
+            stats = pstats.Stats(profiler).sort_stats("cumtime")
+            stats.print_stats(20)  # 打印前 10 个耗时函数
+        else:
+            executor.iterative_tuning()
     else:
-        executor.iterative_tuning()
+        executor.run_all_dp()
     
     # if gpc["PROFILE_GENERATION"]:
     #     profiler = cProfile.Profile()
