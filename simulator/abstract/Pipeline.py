@@ -22,31 +22,27 @@ workload_type_mapping = {
 
 class PipelineScheduler:
 
-    def __init__(self, schedule_method, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, time=0, mid_offset=None, placement=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+    def __init__(self, schedule_method, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, device_num, layer_num, time=0, mid_offset=None, placement=None, partition=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
         self.executor = executor
         self.chunk_num = chunk_num
+        self.device_num = device_num
+        self.layer_num = layer_num
         self.time = time
         self.mbs = mbs
         self.bs = bs
         self.pipeline_idx = pipeline_idx # A flag for identifying each pipeline
         self.results = {}
-        self.device_num = gpc["DEVICE_NUM"]
-        self.comp_power = comp_power if comp_power else [1 for _ in range(self.device_num)]
-        self.max_mem = max_mem if max_mem else [gpc["GPU_MAX_MEM"] for _ in range(self.device_num)]
-        self.layer_num = gpc["LAYER_NUM"]
         self.devices: list[Device] = []
         self.nmb = nmb
         self.mid_offset = pipeline_idx * self.nmb if not mid_offset else mid_offset
         self.solver_results = None
+        self.comp_power = comp_power if comp_power else [1 for _ in range(self.device_num)]
+        self.max_mem = max_mem if max_mem else [gpc["GPU_MAX_MEM"] for _ in range(self.device_num)]
+
+        self._init_placement_and_partition(schedule_method=schedule_method, placement=placement, partition=partition)
         
-        self.placement = [] if not placement else placement
-        self.partition = [] if not placement else [len(p) for p in self.placement]
-        self.stage_num = self.device_num * self.chunk_num
-        if not self.placement:
-            print("Use heuristic model partition and placement.")
-            self.set_model_partition_and_placement()
         self.total_workload = self.stage_num * self.nmb
         self.layer_wise = gpc["LAYERWISE"]
         self.head_dp = gpc["HEAD_DP"]
@@ -72,6 +68,30 @@ class PipelineScheduler:
             for workload in workloads:
                 device.executable_workloads.push(workload)
 
+    def _init_placement_and_partition(self, schedule_method, placement, partition):
+        if schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED, Schedule.STANDARD_AFAB, Schedule.ReCycle):
+            self.stage_num = self.device_num * self.chunk_num
+            assert self.layer_num % self.stage_num == 0, f"Layer num {self.layer_num} should be divisible by stage num {self.stage_num} for standard schedules."
+            self.partition = [self.layer_num // self.stage_num] * self.stage_num
+            self.placement = [[i + self.device_num * j for j in range(self.chunk_num)] for i in range(self.device_num)]
+        elif schedule_method == Schedule.Mist:
+            assert partition, "Mist schedule requires predefined partition."
+            self.partition = partition
+            self.placement = [[i] for i in range(self.device_num)]
+            if placement != self.placement:
+                print("Warning: Mist schedule should use partition-based placement, provided placement will be ignored.")
+            self.schedule_method = Schedule.STANDARD_1F1B
+        elif placement and partition:
+            assert self.layer_num == sum(partition), f"Layer num should be equal to the sum of partition ({self.layer_num} != {sum(partition)})."
+            assert len(placement) == self.device_num, f"Placement length should be equal to device num ({len(placement)} != {self.device_num})."
+            assert len(partition) == sum([len(p) for p in placement]), f"Partition length should be equal to the total number of stages in placement ({len(partition)} != {sum([len(p) for p in placement])})."
+            self.stage_num = len(partition)
+            self.partition = partition
+            self.placement = placement
+        else:
+            assert placement is None and partition is None, "Either both placement and partition should be provided, or neither of them should be provided."
+        print(f"-- Initialize {self.schedule_method.name} placement: {self.placement} and partition : {self.partition} successfully.")
+
     def set_model_partition_and_placement(self):
         self.partition = get_octopipe_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
         if self.schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB, Schedule.ReCycle):
@@ -79,7 +99,7 @@ class PipelineScheduler:
         if self.schedule_method == Schedule.Mist:
             self.partition = get_mist_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
             self.schedule_method = Schedule.STANDARD_1F1B
-        
+
         self.placement = [
             [1 for _ in range(layer_num)] for layer_num in self.partition
         ]
@@ -105,6 +125,9 @@ class PipelineScheduler:
             self.placement = solver_results["assignments"]
             self.partition = [len(p) for p in self.placement]
 
+        self.save_partition()
+
+    def save_partition(self):
         with open("schedule_results/partition.txt", 'w') as f:
             f.write(str(self.partition))
             f.flush()
@@ -145,7 +168,6 @@ class PipelineScheduler:
 
     # NOTE _reset_workload_type is efficient but 
     # lead to random order of W in some cases
-    # which will break solver constraint (not affect the correctness)
     def resort_w(self):
         w_times = [[] for _ in range(self.layer_num + 3)]
         for res in self.results:
@@ -184,131 +206,14 @@ class PipelineScheduler:
                     )
             self.devices.append(device)
         self.set_recomputation_config()
-        if self.stage_num == self.layer_num and self.schedule_method == Schedule.OctoPipe:
-            layer_computation_cost = [gpc["F_TIMES"][i]+gpc["B_TIMES"][i]+gpc["W_TIMES"][i] for i in range(self.layer_num)]
-            head_total = gpc["HEAD_F_TIME"] + gpc["HEAD_B_TIME"] + gpc["HEAD_W_TIME"]
-            ce_total = gpc["CE_F_TIME"] + gpc["CE_B_TIME"] + gpc["CE_W_TIME"]
-            layer_computation_cost[-1] += head_total + ce_total
-            total_layer = self.layer_num
-            self.pipeline_placement_solver = PipelinePlacement(
-                layer_num=total_layer,
-                layer_computation_cost=layer_computation_cost,
-                layer_para=[1 for _ in range(total_layer)],
-                chunk_num=self.chunk_num,
-                dev_num=self.device_num,
-                dev_max_memory=[100000 for _ in range(total_layer)],
-                dev_compute_power=self.comp_power,
-            )
-            if not self.placement:
-                self.placement = self.pipeline_placement_solver.get_placements()
-        if self.placement and self.schedule_method in (Schedule.STANDARD_1F1B, Schedule.ReCycle, Schedule.STANDARD_ZBH, Schedule.STANDARD_AFAB, Schedule.Mist):
-            assert self.placement is not None
-            layer_idx_start = 0
-            for did in range(self.device_num):
-                self.devices[did].add_stage(did, layer_num = len(self.placement[did]), layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
-                layer_idx_start += len(self.placement[did])
-        elif self.placement and self.schedule_method == Schedule.OctoPipe and self.chunk_num == 1:
-            layer_idx_start = 0
-            for did in range(self.device_num):
-                self.devices[did].add_stage(did, layer_num = len(self.placement[did]), layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
-                layer_idx_start += len(self.placement[did])
-        elif self.schedule_method == Schedule.STANDARD_INTERLEAVED:
-            layer_idx_start = 0
-            for pid in range(self.stage_num):
-                self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid],layer_idx_start=layer_idx_start, layer_num = layer_num)
+        assert self.placement and self.partition, "Placement and partition should be provided for initializing devices."
+        layer_idx_start = 0
+        for did in range(self.device_num):
+            for sid in self.placement[did]:
+                layer_num = self.partition[sid]
+                self.devices[did].add_stage(stage_id=sid, layer_num=layer_num, layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
                 layer_idx_start += layer_num
-        elif self.placement:
-            layer_idx_start = 0
-            for did in range(self.device_num):
-                for pid in self.placement[did]:
-                    self.devices[did].add_stage(pid, layer_num = layer_num, recomp=self.recomp_set[pid],layer_idx_start=layer_idx_start)
-                    layer_idx_start += layer_num
-        elif self.layer_wise:
-            if gpc["STAGE_PLACEMENT"] == Placement.INTERLEAVED:
-                print("Use Interleaved placement")
-                for pid in range(self.layer_num):
-                    self.devices[pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid])
-            elif gpc["STAGE_PLACEMENT"] == Placement.RECURRENT:
-                print("Use Recurrent placement")
-                unit = range(self.device_num)
-                orders = []
-                while len(orders) < self.layer_num:
-                    unit = list(unit)
-                    orders += unit[:-1]
-                    unit = reversed(unit)
-
-                for pid in range(self.layer_num - 1):
-                    self.devices[orders[pid]].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid])
-                self.devices[-1].add_stage(self.layer_num, layer_num = layer_num, recomp=self.recomp_set[pid])
-            elif gpc["STAGE_PLACEMENT"] == Placement.CROSS:
-                print("Use V+I placement")
-                for pid in range(self.layer_num):
-                    if (pid // (self.device_num)) == self.layer_num // (self.device_num) - 1:
-                        self.devices[self.device_num - 1 - pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid + 1])
-                    else:
-                        self.devices[pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid + 1])
-            else:   
-                print("Use Wavelike placement")
-                offset = self.device_num if gpc["REVERSE_LAST_STAGES"] else 0
-                print(f"Reverse last {offset} stages.")
-                for pid in range(self.layer_num - offset):
-                    if (pid // self.device_num) % 2 == 0:
-                        self.devices[pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid + 1])
-                    else:
-                        self.devices[self.device_num - 1 - pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid + 1])
-                for pid in range(self.layer_num - offset, self.layer_num):
-                    self.devices[pid % self.device_num].add_stage(pid + 1, layer_num = layer_num, recomp=self.recomp_set[pid + 1])
-
-            if gpc["STAGE_PLACEMENT"] != Placement.RECURRENT:
-                self.devices[-1].add_stage(0, layer_num = layer_num)
-                self.devices[0].add_stage(self.layer_num+1, layer_num = layer_num)
-                self.devices[1].add_stage(self.layer_num+2, layer_num = layer_num)
-            else:
-                self.devices[-1].add_stage(0, layer_num = layer_num)
-                self.devices[0].add_stage(self.layer_num+1, layer_num = layer_num)
-                self.devices[1].add_stage(self.layer_num+2, layer_num = layer_num)
-        else:
-            layer_idx_start = 0
-            if self.schedule_method == Schedule.STANDARD_INTERLEAVED:
-                for pid in range(self.stage_num):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid],layer_idx_start=layer_idx_start, layer_num = layer_num)
-                    layer_idx_start += layer_num
-            elif self.schedule_method == Schedule.STANDARD_ZBH:
-                layer_num = self.layer_num // self.device_num
-                assert layer_num == int(layer_num)
-                for pid in range(self.device_num):
-                    self.devices[did].add_stage(pid, recomp=self.recomp_set[pid],layer_idx_start=layer_idx_start, layer_num = layer_num)
-                    layer_idx_start += layer_num
-            elif self.schedule_method in (Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED):
-                for pid in range(self.stage_num):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid],layer_idx_start=layer_idx_start, layer_num = layer_num)
-                    layer_idx_start += layer_num
-            elif gpc["STAGE_PLACEMENT"] == Placement.SEARCHED:
-                print("Use Searched placement")
-                for pid in range(self.device_num):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-                for pid in range(self.device_num, self.device_num * 2):
-                    self.devices[self.device_num - (pid % self.device_num) - 1].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-                for pid in range(self.device_num * 2, self.stage_num):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-            elif gpc["STAGE_PLACEMENT"] == Placement.INTERLEAVED:
-                print("Use Interleaved placement")
-                offset = self.device_num if gpc["REVERSE_LAST_STAGES"] else 0
-                for pid in range(self.stage_num - offset):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-                for pid in range(self.stage_num - offset, self.stage_num):
-                    self.devices[self.device_num - (pid % self.device_num) - 1].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-            else:
-                assert self.stage_num <= self.layer_num, f"STAGE should be less than LAYER ({self.stage_num} >= {self.layer_num})"                
-                offset = self.device_num if gpc["REVERSE_LAST_STAGES"] else 0
-                for pid in range(self.stage_num - offset):
-                    if (pid // self.device_num) % 2 == 0:
-                        self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-                    else:
-                        self.devices[self.device_num - 1 - pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-                for pid in range(self.stage_num - offset, self.stage_num):
-                    self.devices[pid % self.device_num].add_stage(pid, recomp=self.recomp_set[pid], layer_num = layer_num)
-
+        
         if self.head_dp:
             for device in self.devices:
                 device.add_stage(self.stage_num, False, False, 0)
@@ -468,7 +373,7 @@ class PipelineScheduler:
                     operation_flag = 'b'
                 elif operation_flag == 'b':
                     if mids[idx_in_b_mids] < self.nmb:
-                        if gpc["RECOMP"]:
+                        if gpc["RECOMP"] and gpc["SPLIT_RECOMP"]:
                             self.schedule[did].append((WorkloadType.R ,mids[idx_in_b_mids] + mid_offset, b_next_sid))
                         self.schedule[did].append((WorkloadType.B ,mids[idx_in_b_mids] + mid_offset, b_next_sid))
                         if self.bwd_split:
