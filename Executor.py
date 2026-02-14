@@ -108,6 +108,12 @@ class Executor:
         self.dp_size        = dp_size
         self.chunk_num      = chunk_num
         self.model_name     = model_name,
+        self.execute_strategy = ExecuteStrategy(
+            overlap_aware   =   gpc["OVERLAP_AWARE_SCHEDULE"],
+            save_memory     =   gpc["SAVE_MEMORY"],
+            constrain_warmup    =   gpc["CONSTRAIN_WARMUP"],
+            swith_workload_type =   gpc["SWITCH_WORKLOAD_TYPE"],
+        )
         self.device_num     = gpc["DEVICE_NUM"]
         self.layer_num      = gpc["LAYER_NUM"]
         self.stage_num      = chunk_num * self.device_num
@@ -125,6 +131,7 @@ class Executor:
                 schedule_method=self.schedule_method,
                 bwd_split=self.bwd_split,
                 pipeline_idx=dp_idx, 
+                execute_strategy=self.execute_strategy,
                 chunk_num=self.chunk_num if not tune_partition else 1,
                 device_num=self.device_num,
                 layer_num=self.layer_num,
@@ -648,9 +655,9 @@ if __name__ == "__main__":
     chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
     chunk_num = 1
     schedule_method = Schedule.OctoPipe
-    schedule_method = Schedule.STANDARD_1F1B
+    # schedule_method = Schedule.STANDARD_1F1B
     # schedule_method = Schedule.STANDARD_ZBH
-    schedule_method = Schedule.STANDARD_INTERLEAVED
+    # schedule_method = Schedule.STANDARD_INTERLEAVED
     bwd_split = False
     if schedule_method == Schedule.STANDARD_ZBH:
         bwd_split = True

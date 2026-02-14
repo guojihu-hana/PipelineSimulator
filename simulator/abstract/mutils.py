@@ -1,4 +1,11 @@
 from ..config import *
+class ExecuteStrategy:
+    def __init__(self, overlap_aware, save_memory, constrain_warmup, swith_workload_type):
+        self.overlap_aware = overlap_aware
+        self.save_memory = save_memory
+        self.constrain_warmup = constrain_warmup
+        self.switch_workload_type = swith_workload_type
+
 
 def dict_to_2d_list(nested_dict):
     rows = sorted(nested_dict.keys())

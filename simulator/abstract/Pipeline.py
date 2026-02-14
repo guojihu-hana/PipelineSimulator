@@ -22,10 +22,11 @@ workload_type_mapping = {
 
 class PipelineScheduler:
 
-    def __init__(self, schedule_method, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, device_num, layer_num, time=0, mid_offset=None, placement=None, partition=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+    def __init__(self, schedule_method, execute_strategy: ExecuteStrategy, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, device_num, layer_num, time=0, mid_offset=None, placement=None, partition=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
         self.executor = executor
+        self.execute_strategy = execute_strategy
         self.chunk_num = chunk_num
         self.device_num = device_num
         self.layer_num = layer_num
@@ -195,6 +196,8 @@ class PipelineScheduler:
                         bwd_split = self.bwd_split,
                         did=did,
                         nmb=self.nmb,
+                        execute_strategy=self.execute_strategy,
+                        layer_num=self.layer_num,
                         device_num=self.device_num,
                         chunk_num=self.chunk_num,
                         stage_num=self.stage_num,
