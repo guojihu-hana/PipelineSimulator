@@ -650,7 +650,7 @@ if __name__ == "__main__":
     schedule_method = Schedule.OctoPipe
     schedule_method = Schedule.STANDARD_1F1B
     # schedule_method = Schedule.STANDARD_ZBH
-    # schedule_method = Schedule.STANDARD_INTERLEAVED
+    schedule_method = Schedule.STANDARD_INTERLEAVED
     bwd_split = False
     if schedule_method == Schedule.STANDARD_ZBH:
         bwd_split = True
@@ -658,7 +658,6 @@ if __name__ == "__main__":
         chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
         # chunk_num = 2
         # bwd_split = False
-    
     executor = Executor(dp_size=1, nmb_per_dp=[4 * gpc["DEVICE_NUM"]], chunk_num=chunk_num, schedule_method=schedule_method, bwd_split=bwd_split, device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)])
     iter_tuning = False
 

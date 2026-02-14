@@ -195,6 +195,7 @@ class PipelineScheduler:
                         bwd_split = self.bwd_split,
                         did=did,
                         nmb=self.nmb,
+                        device_num=self.device_num,
                         chunk_num=self.chunk_num,
                         stage_num=self.stage_num,
                         mid_offset=self.mid_offset,

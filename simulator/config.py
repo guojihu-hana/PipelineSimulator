@@ -13,16 +13,8 @@ MICRO_BATCH_TIME = [1 + random.randint(0, 1) for _ in range(MICRO_BATCH_NUM)]
 MICRO_BATCH_TIME = [1 if _ % 2 else 2 for _ in range(MICRO_BATCH_NUM)]
 
 SOLVING_TIME_LIMIT = 60 * 30
-SCHEDULE_METHOD = Schedule.Layerwise
 SCHEDULE_METHOD = Schedule.STANDARD_1F1B
-# SCHEDULE_METHOD = Schedule.ReCycle
-# SCHEDULE_METHOD = Schedule.STANDARD_INTERLEAVED
-# SCHEDULE_METHOD = Schedule.STANDARD_ZBH
-# SCHEDULE_METHOD = Schedule.Mist
-# SCHEDULE_METHOD = Schedule.OctoPipe
 
-# SCHEDULE_METHOD = Schedule.ZBV
-# SCHEDULE_METHOD = Schedule.STANDARD_AFAB
 STAGE_PLACEMENT = Placement.INTERLEAVED
 # STAGE_PLACEMENT = Placement.SEARCHED
 # STAGE_PLACEMENT = Placement.WAVELIKE
@@ -34,7 +26,6 @@ if SCHEDULE_METHOD == Schedule.STANDARD_INTERLEAVED:
 if SCHEDULE_METHOD in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB):
     CHUNK_NUM = 1
 # --------------------- Solver config ---------------------
-Hierarchical = False
 test_upp = True if SCHEDULE_METHOD == Schedule.OctoPipe else False
 HETER_DEVICE = True
 HETER_RATIO = 1
