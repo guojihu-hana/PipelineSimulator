@@ -8,7 +8,7 @@ class Workload:
     IN_PROGRESS = 2
     COMPLETED = 3
 
-    def __init__(self, schedule_method, device_id:int, microbatch_id: int, stage_id: int, bwd_split: bool, duration: int, total_stages:int, wtype: WorkloadType, recomp:bool, layer_idxs:list, comp_power:float):
+    def __init__(self, schedule_method, device_id:int, microbatch_id: int, stage_id: int, bwd_split: bool, duration: int, total_stages:int, wtype: WorkloadType, recomp:bool, split_recomp:bool, layer_idxs:list, comp_power:float):
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
         self.did = device_id
@@ -21,6 +21,7 @@ class Workload:
         self.ready_time: int = -1
         self.total_stages: int = total_stages
         self.recomp:bool = recomp
+        self.split_recomp:bool = split_recomp
         self.layer_idxs:list = layer_idxs
         self.comp_power = comp_power
         if self.mid == 0 and self.sid == 0:
@@ -65,7 +66,7 @@ class Workload:
                         microbatch_id=self.mid, 
                         workload_type = WorkloadType.F)
                 )
-            if self.recomp:
+            if self.recomp and self.split_recomp:
                 self.constraints.add(
                     WorkloadConstraint(
                         device_id = self.did,

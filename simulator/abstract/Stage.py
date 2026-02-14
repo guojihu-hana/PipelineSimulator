@@ -9,7 +9,7 @@ class StageType:
     CE = 4
     LAYERS = 5
 
-def calculate_total_time(wtype:WorkloadType, recomp, layer_idxs:list)->float:
+def calculate_total_time(wtype:WorkloadType, recomp, split_recomp, layer_idxs:list)->float:
     if layer_idxs == None:
         return 0
     total_time = 0
@@ -17,22 +17,25 @@ def calculate_total_time(wtype:WorkloadType, recomp, layer_idxs:list)->float:
         WorkloadType.F:"F_TIMES",
         WorkloadType.B:"B_TIMES",
         WorkloadType.W:"W_TIMES",
+        WorkloadType.R:"F_TIMES",
     }
     times = gpc[type_time_map[wtype]]
     for idx in layer_idxs:
         total_time += times[idx]
 
     if recomp and wtype == WorkloadType.B:
-        for idx in layer_idxs:
-            total_time += gpc["F_TIMES"][idx]
+        if not split_recomp:
+            for idx in layer_idxs:
+                total_time += gpc["F_TIMES"][idx]
+
     return total_time
 
-def get_workload_duration(mid:int, sid:int, layer_wise:bool, bwd_split: bool, layer_num:int, stage_num: int, wtype:WorkloadType, recomp, layer_idxs:list=None, comp_power:float = 1)->float:
+def get_workload_duration(mid:int, sid:int, layer_wise:bool, bwd_split: bool, layer_num:int, stage_num: int, wtype:WorkloadType, recomp, split_recomp, layer_idxs:list=None, comp_power:float = 1)->float:
     if layer_wise:
         assert f"LAYERWISE not enabled."
     
-    duration = calculate_total_time(wtype=wtype, recomp=recomp, layer_idxs=layer_idxs)
-    # print(f"Sid:{sid}, Duration:{duration}.")
+    duration = calculate_total_time(wtype=wtype, recomp=recomp, split_recomp=split_recomp, layer_idxs=layer_idxs)
+
     if wtype in (WorkloadType.F, WorkloadType.R):
         if sid == 0:
             duration += gpc["EMB_F_TIME"]
@@ -40,14 +43,13 @@ def get_workload_duration(mid:int, sid:int, layer_wise:bool, bwd_split: bool, la
             duration += gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]
         elif sid == stage_num and HEAD_DP:
             duration = gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]
-    elif wtype == WorkloadType.B: # Consider recomputation
-        recomp = 0 #DEBUG seperate R and B
-        if sid == stage_num - 1 and not HEAD_DP:
-            duration += gpc["HEAD_B_TIME"] + gpc["CE_B_TIME"] + (gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]) * recomp
-            if not bwd_split:
-                duration += gpc["HEAD_W_TIME"]
-        elif sid == stage_num and HEAD_DP:
-            duration = gpc["HEAD_B_TIME"] + gpc["CE_B_TIME"] + (gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]) * recomp
+    elif wtype == WorkloadType.B:
+        recomp = 0
+        if sid == stage_num - 1:
+            duration += gpc["HEAD_B_TIME"] + gpc["CE_B_TIME"]
+            if recomp:
+                if not split_recomp:
+                    duration += (gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"])
             if not bwd_split:
                 duration += gpc["HEAD_W_TIME"]
         elif sid == 0:
@@ -55,10 +57,8 @@ def get_workload_duration(mid:int, sid:int, layer_wise:bool, bwd_split: bool, la
             if not bwd_split:
                 duration += gpc["EMB_W_TIME"]
     elif wtype == WorkloadType.W:
-        if sid == stage_num - 1 and not HEAD_DP:
+        if sid == stage_num - 1:
             duration += gpc["HEAD_W_TIME"]
-        elif sid == stage_num and HEAD_DP:
-            duration = gpc["HEAD_W_TIME"]
         elif sid == 0:
             duration += gpc["EMB_W_TIME"]
     else:
@@ -72,7 +72,7 @@ class Stage:
     VSHAPE = 2
     WAVELIKE = 3
 
-    def __init__(self,schedule_method, bwd_split: bool, device_id:int, stage_id: int, stage_num: int, para_num:int, stage_type: StageType, nmb:int, mid_offset:int, layer_num: int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, comp_power: float = 1):
+    def __init__(self,schedule_method, bwd_split: bool, device_id:int, stage_id: int, stage_num: int, para_num:int, stage_type: StageType, nmb:int, mid_offset:int, layer_num: int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, split_recomp: bool = False, comp_power: float = 1):
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
         self.did: int = device_id
@@ -91,6 +91,7 @@ class Stage:
         self.workloads: dict[int, dict[WorkloadType, Workload]] = {}  
         self.stage_type: StageType = stage_type
         self.recomp = recomp
+        self.split_recomp = split_recomp
         self.layerwise = layerwise
         self.layer_num = layer_num
         self.layer_idx_start = layer_idx_start
@@ -136,10 +137,12 @@ class Stage:
                     stage_num=self.stage_num,
                     wtype=WorkloadType.F,
                     recomp=self.recomp,
+                    split_recomp=self.split_recomp,
                     layer_idxs=self.layer_idxs,
                     comp_power=self.comp_power,
                 ),
                 recomp=self.recomp,
+                split_recomp=self.split_recomp,
                 total_stages=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
@@ -164,41 +167,46 @@ class Stage:
                     stage_num=self.stage_num,
                     wtype=WorkloadType.B,
                     recomp=self.recomp,
+                    split_recomp=self.split_recomp,
                     layer_idxs=self.layer_idxs,
                     comp_power=self.comp_power,
                 ), 
                 recomp=self.recomp,
+                split_recomp=self.split_recomp,
                 total_stages=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
             )
             self.workloads[mid][WorkloadType.B] = igw
             if self.recomp:
-                rfw = Workload(
-                    schedule_method = self.schedule_method,
-                    bwd_split=self.bwd_split,
-                    device_id=self.did,
-                    stage_id=self.sid,
-                    microbatch_id=mid,
-                    wtype=WorkloadType.R,
-                    duration=get_workload_duration(
-                    bwd_split=self.bwd_split,
-                        mid=mid,
-                        sid=self.sid,
-                        layer_wise=self.layerwise,
-                        layer_num=self.layer_num,
-                        stage_num=self.stage_num,
+                if self.split_recomp:
+                    rfw = Workload(
+                        schedule_method = self.schedule_method,
+                        bwd_split=self.bwd_split,
+                        device_id=self.did,
+                        stage_id=self.sid,
+                        microbatch_id=mid,
                         wtype=WorkloadType.R,
+                        duration=get_workload_duration(
+                        bwd_split=self.bwd_split,
+                            mid=mid,
+                            sid=self.sid,
+                            layer_wise=self.layerwise,
+                            layer_num=self.layer_num,
+                            stage_num=self.stage_num,
+                            wtype=WorkloadType.R,
+                            recomp=self.recomp,
+                            split_recomp=self.split_recomp,
+                            layer_idxs=self.layer_idxs,
+                            comp_power=self.comp_power,
+                        ), 
                         recomp=self.recomp,
+                        split_recomp=self.split_recomp,
+                        total_stages=total_stages,
                         layer_idxs=self.layer_idxs,
                         comp_power=self.comp_power,
-                    ), 
-                    recomp=self.recomp,
-                    total_stages=total_stages,
-                    layer_idxs=self.layer_idxs,
-                    comp_power=self.comp_power,
-                )
-                self.workloads[mid][WorkloadType.R] = rfw
+                    )
+                    self.workloads[mid][WorkloadType.R] = rfw
 
             if self.bwd_split:
                 pgw = Workload(
@@ -217,9 +225,11 @@ class Stage:
                         stage_num=self.stage_num,
                         wtype=WorkloadType.W,
                         recomp=self.recomp,
+                        split_recomp=self.split_recomp,
                         layer_idxs=self.layer_idxs,
                         comp_power=self.comp_power,
                     ),
+                    split_recomp=self.split_recomp,
                     recomp=self.recomp,
                     total_stages=total_stages,
                     layer_idxs=self.layer_idxs,

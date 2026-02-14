@@ -126,7 +126,8 @@ class Device:
         self.warmup_end_flag = False
         self.warmup_diff = 1 if self.did != DEVICE_NUM - 1 else 0
         self.begin_warmup_num = (self.chunk_num - 1) * gpc["PP_SIZE"] + 1 + gpc["PP_SIZE"] - 1 - self.did + self.warmup_diff
-        self.recycle_warmup_num = gpc["PP_SIZE"] - self.did
+        self.begin_warmup_num = (self.chunk_num - 1) * gpc["PP_SIZE"] + 1 + (gpc["PP_SIZE"] - 1 - self.did) * 2 + 1 + self.warmup_diff
+        self.begin_warmup_num = (4 - self.did)
         # self.begin_warmup_num = (self.chunk_num - 1) * gpc["PP_SIZE"] + 1 + (gpc["PP_SIZE"] - 1 - self.did) * 2
         self.idle_time = 0
         self.steady_start_flag = False
@@ -360,6 +361,8 @@ class Device:
     def has_direct_dependency(self, time, workload:Workload):
         if len(self.workload_execute_record[self.did]) == 0:
             return False
+        if self.workload_execute_record[self.did][-1].end_time < time: # Already idle
+            return False
         for did, executed_workloads in enumerate(self.workload_execute_record):
             if did == self.did or len(executed_workloads) == 0:
                 continue
@@ -433,7 +436,7 @@ class Device:
             if self.last_wtype == WorkloadType.F:
                 workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
 
-        if gpc["SAVE_MEMORY"] and self.get_max_mem_did() == self.did and self.current_mem_usage > self.peak_memory_usage / 5 * 4:
+        if gpc["SAVE_MEMORY"]:
             if self.last_wtype == WorkloadType.B:
                 workload_type_order = [WorkloadType.W,WorkloadType.F,WorkloadType.B]
             if self.last_wtype == WorkloadType.W:
@@ -441,7 +444,7 @@ class Device:
         
         self.executable_workloads.set_type_order(workload_type_order)
         workload = self.executable_workloads.pop()
-        delayed_workloads = []
+        delayed_workloads = []        
         while len(self.executable_workloads) and gpc["OVERLAP_AWARE_SCHEDULE"] and self.has_direct_dependency(time=time, workload=workload):
             delayed_workloads.append(workload)
             workload = self.executable_workloads.pop()
@@ -450,55 +453,8 @@ class Device:
             self.executable_workloads.push(delayed_workload)
         
         if not workload:
-            return [delayed_workloads[0]]
+            return [self.executable_workloads.pop()]
         return [workload]
-    
-    # def get_executable_overlap_aware_workload(self, time)->list[Workload]:
-    #     executable_workoads = []
-    #     workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
-    #     if gpc["SWITCH_WORKLOAD_TYPE"]:
-    #         if self.last_wtype == WorkloadType.B:
-    #             workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
-    #         if self.last_wtype == WorkloadType.F:
-    #             workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
-
-    #     if gpc["SAVE_MEMORY"] and self.get_max_mem_did() == self.did and self.current_mem_usage > self.peak_memory_usage / 5 * 4:
-    #         if self.last_wtype == WorkloadType.B:
-    #             workload_type_order = [WorkloadType.W,WorkloadType.F,WorkloadType.B]
-    #         if self.last_wtype == WorkloadType.W:
-    #             workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
-    #     if gpc["SAVE_MEMORY"]:
-    #         head_ce_workloads = []
-    #         for wtype in [WorkloadType.W]:
-    #             for mid in range(self.mid_offset, self.mid_offset + self.nmb):
-    #                 for sid in self.stages:
-    #                         workloads = self.stages[sid].workloads
-    #                         if mid not in workloads: continue
-    #                         if wtype in workloads[mid] and workloads[mid][wtype].is_executable(time=time):
-    #                             head_ce_workloads.append(workloads[mid][wtype])                          
-    #         # ensure head to be executed as quickly as possible
-    #         executable_workoads += head_ce_workloads
-
-    #     delayed_workload = []
-    #     canceled_workload = []
-    #     for wtype in workload_type_order:
-    #         for mid in range(self.bs // self.mbs):
-    #             for sid in self.stages:
-    #                 workloads = self.stages[sid].workloads
-    #                 if mid in workloads and wtype in workloads[mid] and workloads[mid][wtype].is_executable(time=time):
-    #                     workload = workloads[mid][wtype]
-    #                     if gpc["OVERLAP_AWARE_SCHEDULE"] and self.has_direct_dependency(time=time, workload=workload):
-    #                         if self.is_bottleneck_device():
-    #                             delayed_workload.append(workloads[mid][wtype])
-    #                         else:
-    #                             canceled_workload.append(workloads[mid][wtype])
-    #                     else:
-    #                         executable_workoads.append(workloads[mid][wtype])
-    #     executable_workoads += delayed_workload
-    #     if len(executable_workoads) == 0:
-    #         executable_workoads += canceled_workload
-
-    #     return executable_workoads
 
     def show_stages(self, detail_info=False):
         for sid in self.stages:
@@ -612,10 +568,12 @@ class Device:
                     if gpc["CONSTRAIN_WARMUP"]:
                         if self.exe_num_f < self.begin_warmup_num:
                             if wtype != WorkloadType.F:
+                                self.executable_workloads.push(workload)
                                 continue
                         else:
                             if not self.warmup_end_flag:
                                 if wtype != WorkloadType.B:
+                                    self.executable_workloads.push(workload)
                                     continue
                     
                     proc_workload = self.stages[sid].execute_workload(time, mid=mid,workload_type=wtype)
