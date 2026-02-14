@@ -47,8 +47,7 @@ TIME_LIMIT = 150000
 HEAD_DP = False if test_upp else False
 # [1, 2, 100, None]
 OVERLAP_DEGREE = None
-MEMORY_CONSTRAIN = 0.9
-MEMORY_REDUCATION = 0.0
+
 IDEAL_SITUATION = False
 
 # Gemma
@@ -93,6 +92,7 @@ if IDEAL_SITUATION:
 
 LAYERWISE = False
 RECOMP = False
+SPLIT_RECOMP = False
 AUTO_RECOMP_SEARCH = False
 RUN_SCHEDULE = False
 RUN_STANDARD_ZBV = False
@@ -114,14 +114,19 @@ if not RUN_SCHEDULE and RUN_STANDARD_ZBV:
 if DEEPSEEK + GEMMA + NEMOTRONH > 1:
     print(f"DeepSeek:{DEEPSEEK}, Gemma:{GEMMA}, NemotronH:{NEMOTRONH}")
 
-SAVE_MEMORY = False
+SAVE_MEMORY = True
 CONSTRAIN_WARMUP = False
 SWITCH_WORKLOAD_TYPE = True
+MEMORY_CONSTRAIN = 0.1
+MEMORY_REDUCATION = 0.0
 
 F_TIME = 10
 F_TIMES = [F_TIME] * LAYER_NUM
 B_TIMES = [F_TIME] * LAYER_NUM
 W_TIMES = [F_TIME] * LAYER_NUM
+F_TIMES[-1] += F_TIME // 2
+B_TIMES[-1] += 6
+
 
 if not IDEAL_SITUATION:
     if GEMMA:
@@ -194,6 +199,33 @@ if not IDEAL_SITUATION:
             HEAD_W_TIME = F_TIME * hw_mf
         F_TIMES = [t*tf_mf if (i+1)%diff==0 else t for i,t in enumerate(F_TIMES)]
         print("------ Test vary length sequence. -----")
+
+from data.profiled_data import stage_time
+MODEL_NAME = "gpt-oss-20B"
+LAYER_NUM=24
+F_TIMES = stage_time[MODEL_NAME][2048]["f"]
+B_TIMES = stage_time[MODEL_NAME][2048]["b"]
+MODEL_NAME = "nemotron-nano-v2-9B"
+LAYER_NUM=56
+F_TIMES = stage_time[MODEL_NAME][4096]["f"]
+B_TIMES = stage_time[MODEL_NAME][4096]["b"]
+MODEL_NAME = "deepseek-16B"
+LAYER_NUM=28
+F_TIMES = stage_time[MODEL_NAME][4096]["f"]
+B_TIMES = stage_time[MODEL_NAME][4096]["b"]
+# MODEL_NAME = "gpt-13B"
+# LAYER_NUM=40
+# F_TIMES = stage_time[MODEL_NAME][4096]["f"]
+# B_TIMES = stage_time[MODEL_NAME][4096]["b"]
+EMB_F_TIME = 0
+EMB_B_TIME = 0
+EMB_W_TIME = 0
+HEAD_F_TIME = 0
+HEAD_B_TIME = 0
+HEAD_W_TIME = 0
+CE_F_TIME = 0
+CE_B_TIME = 0
+CE_W_TIME = 0
 
 SCHEDULE_UNIT = MICRO_BATCH_NUM // 1
 REVERSE_LAST_STAGES = False

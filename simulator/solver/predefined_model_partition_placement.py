@@ -3,8 +3,8 @@ def get_mist_predefined_partition_placement(seq_len, device_num, layer_num):
     if GEMMA:
         mist_layer_assignments = {
             32 : { 4 : [8, 9, 9, 6], },
-            64 : { 8 : [6, 9, 9, 9, 9, 9, 9, 4], },
-            128 : { 16 : [12, 18, 18, 18, 18, 18, 18, 8], },
+            64 : { 8 : [3, 10, 10, 10, 10, 10, 10, 1], },
+            128 : { 16 : [1, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 2], },
         }
     if DEEPSEEK:
         mist_layer_assignments = {
@@ -39,8 +39,10 @@ def get_octopipe_predefined_partition_placement(seq_len, device_num, layer_num):
                     # Mist 512
                     layer_assignment=[5, 9, 9, 9, 9, 9, 9, 5]
                     layer_assignment=[9, 9, 9, 8, 8, 8, 8, 5]
-                if layer_num == 128:
+                elif layer_num == 128:
                     layer_assignment=[14, 17, 17, 17, 17, 17, 17, 12]
+                else:
+                    layer_assignment = [layer_num//device_num for i in range(device_num)]
             if device_num == 16:
                 # Mist
                 layer_assignment=[1, 5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 5]
@@ -49,9 +51,13 @@ def get_octopipe_predefined_partition_placement(seq_len, device_num, layer_num):
             if device_num == 4:
                 layer_assignment=[10,9,8,5]
             if device_num == 8:
-                layer_assignment=[9, 9, 9, 9, 8, 8, 8, 4]
-                if layer_num == 128:
+                if layer_num == 64:
+                    layer_assignment=[9, 9, 9, 9, 8, 8, 8, 4]
+                elif layer_num == 128:
                     layer_assignment=[18, 17, 17, 17, 17, 17, 17, 8]
+                else:
+                    layer_assignment = [layer_num//device_num for i in range(device_num)]
+            
             if device_num == 16:
                 # Mist
                 layer_assignment=[1, 5, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 5]
