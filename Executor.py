@@ -100,49 +100,37 @@ def serialize(p):
 
 class Executor:
 
-    def __init__(self, schedule_method, dp_size, bwd_split: bool, chunk_num: int, model_name: str = None, nmb_per_dp: list = None, device_comp_power: list[list] = None, device_mem: list[list] = None) -> None:
-        self.schedule_method = schedule_method
-        self.bwd_split      = bwd_split
+    def __init__(self, schedule_method, tc: TrainingConfig, model_name: str = None, nmb_per_dp: list = None, device_comp_power: list[list] = None, device_mem: list[list] = None) -> None:
         self.time           = 0
-        self.finish_flag    = False
-        self.dp_size        = dp_size
-        self.chunk_num      = chunk_num
+        self.schedule_method = schedule_method
         self.model_name     = model_name,
-        self.execute_strategy = ExecuteStrategy(
-            overlap_aware   =   gpc["OVERLAP_AWARE_SCHEDULE"],
-            save_memory     =   gpc["SAVE_MEMORY"],
-            constrain_warmup    =   gpc["CONSTRAIN_WARMUP"],
-            swith_workload_type =   gpc["SWITCH_WORKLOAD_TYPE"],
-        )
-        self.device_num     = gpc["DEVICE_NUM"]
-        self.layer_num      = gpc["LAYER_NUM"]
-        self.stage_num      = chunk_num * self.device_num
-        self.device_comp_power  = device_comp_power if device_comp_power else [[gpc["COMP_POWER"] for _ in range(self.device_num)] for _ in range(dp_size)]
-        self.device_mem         = device_mem if device_mem else [[gpc["GPU_MAX_MEM"] for _ in range(self.device_num)] for _ in range(dp_size)]
-        self.nmb_per_dp     = [gpc["MICRO_BATCH_NUM"] for _ in range(dp_size)] if not nmb_per_dp else nmb_per_dp
-        self.mid_offsets    = [0] + [sum(self.nmb_per_dp[:i]) for i in range(1, dp_size+1)]
-        self.micro_batch_size = gpc["MICRO_BATCH_SIZE"]
+        self.tc             = tc
+        self.bwd_split      = tc.bwd_split
+        self.finish_flag    = False
+        self.dp_size        = tc.dp_size
+        self.chunk_num      = tc.chunk_num
+        self.device_num     = tc.device_num
+        self.layer_num      = tc.layer_num
+        self.stage_num      = self.chunk_num * self.device_num
+        self.device_comp_power  = device_comp_power if device_comp_power else [[gpc["COMP_POWER"] for _ in range(self.device_num)] for _ in range(self.dp_size)]
+        self.device_mem         = device_mem if device_mem else [[gpc["GPU_MAX_MEM"] for _ in range(self.device_num)] for _ in range(self.dp_size)]
+        self.nmb_per_dp     = [tc.micro_batch_num for _ in range(self.dp_size)] if not nmb_per_dp else nmb_per_dp
+        self.mid_offsets    = [0] + [sum(self.nmb_per_dp[:i]) for i in range(1, self.dp_size+1)]
+        self.micro_batch_size = tc.micro_batch_size
         self.batch_size = sum(self.nmb_per_dp) * self.micro_batch_size
         self.best_pipelines = None
 
     def _init_pipelines(self, placement = None, partition=None, tune_partition=False):
         self.pipelines      = [
             PipelineScheduler(
-                schedule_method=self.schedule_method,
-                bwd_split=self.bwd_split,
                 pipeline_idx=dp_idx, 
-                execute_strategy=self.execute_strategy,
-                chunk_num=self.chunk_num if not tune_partition else 1,
-                device_num=self.device_num,
-                layer_num=self.layer_num,
+                schedule_method=self.schedule_method,
+                training_config=self.tc,
                 placement=placement,
                 partition=partition,
-                nmb=self.nmb_per_dp[dp_idx], 
                 mid_offset=self.mid_offsets[dp_idx],
                 comp_power=self.device_comp_power[dp_idx],
                 max_mem=self.device_mem[dp_idx],
-                mbs=self.micro_batch_size,
-                bs=self.batch_size,
                 executor=self
             ) for dp_idx in range(self.dp_size)
         ]
@@ -169,7 +157,7 @@ class Executor:
                     finished_mid = device.current_workload.mid
                     for p in self.pipelines:
                         for d in p.devices:
-                            if d.did == device.did or p.pipeline_idx == pipeline.pipeline_idx:
+                            if d.did == device.did or p.pid == pipeline.pid:
                                 continue # only update constraints on other devices or pipelines
                             if finished_mid in d.held_mids:
                                 d.update_constraints_within_device(time, constraint=device.current_workload)
@@ -583,13 +571,13 @@ class Executor:
                 finish_count += pipeline.num_finished_microbatch
                 if self.dp_size > 1 and self.schedule_method in (Schedule.OctoPipe, Schedule.ReCycle):
                     if self.get_time() == 0:
-                        if pipeline.pipeline_idx == 0:
+                        if pipeline.pid == 0:
                             # Pop all
                             # workloads = pipeline.pop_workload(mid_group=list(range(pipeline.mid_offset, pipeline.mid_offset + pipeline.nmb)), did_group=[2])
                             # Pop partial
                             workloads = pipeline.pop_workload(mid_group=list(range(pipeline.mid_offset, pipeline.mid_offset + pipeline.nmb - 3)), did_group=[2])
                     if self.get_time() == 0:
-                        if pipeline.pipeline_idx == 1:
+                        if pipeline.pid == 1:
                             pipeline.insert_workload(workloads=workloads,did_group=[2])
             self.finish_flag = True if finish_count == self.get_total_workload_count() else False
             self.update_time()
@@ -665,7 +653,32 @@ if __name__ == "__main__":
         chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
         # chunk_num = 2
         # bwd_split = False
-    executor = Executor(dp_size=1, nmb_per_dp=[4 * gpc["DEVICE_NUM"]], chunk_num=chunk_num, schedule_method=schedule_method, bwd_split=bwd_split, device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)])
+    
+    tc = TrainingConfig(
+        pp_size=gpc["DEVICE_NUM"],
+        tp_size=1,
+        dp_size=1,
+        bwd_split=bwd_split,
+        vocab_parallel  =False,
+        overlap_aware   =   gpc["OVERLAP_AWARE_SCHEDULE"],
+        save_memory     =   gpc["SAVE_MEMORY"],
+        constrain_warmup    =   gpc["CONSTRAIN_WARMUP"],
+        swith_workload_type =   gpc["SWITCH_WORKLOAD_TYPE"],
+        layer_num=gpc["LAYER_NUM"],
+        chunk_num=chunk_num,
+        device_num=gpc["DEVICE_NUM"],
+        micro_batch_num=gpc["MICRO_BATCH_NUM"],
+        micro_batch_size=gpc["MICRO_BATCH_SIZE"],
+        layer_f_times=gpc["F_TIMES"],
+        layer_b_times=gpc["B_TIMES"],
+        layer_w_times=gpc["W_TIMES"],
+    )
+    executor = Executor(
+        schedule_method=schedule_method, 
+        tc=tc,
+        nmb_per_dp=[4 * gpc["DEVICE_NUM"]], 
+        device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)]
+    )
     iter_tuning = False
 
     if iter_tuning:

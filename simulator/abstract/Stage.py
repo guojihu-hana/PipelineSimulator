@@ -9,82 +9,34 @@ class StageType:
     CE = 4
     LAYERS = 5
 
-def calculate_total_time(wtype:WorkloadType, recomp, split_recomp, layer_idxs:list)->float:
-    if layer_idxs == None:
-        return 0
-    total_time = 0
-    type_time_map = {
-        WorkloadType.F:"F_TIMES",
-        WorkloadType.B:"B_TIMES",
-        WorkloadType.W:"W_TIMES",
-        WorkloadType.R:"F_TIMES",
-    }
-    times = gpc[type_time_map[wtype]]
-    for idx in layer_idxs:
-        total_time += times[idx]
-
-    if recomp and wtype == WorkloadType.B:
-        if not split_recomp:
-            for idx in layer_idxs:
-                total_time += gpc["F_TIMES"][idx]
-
-    return total_time
-
-def get_workload_duration(mid:int, sid:int, layer_wise:bool, bwd_split: bool, layer_num:int, stage_num: int, wtype:WorkloadType, recomp, split_recomp, layer_idxs:list=None, comp_power:float = 1)->float:
-    if layer_wise:
-        assert f"LAYERWISE not enabled."
-    
-    duration = calculate_total_time(wtype=wtype, recomp=recomp, split_recomp=split_recomp, layer_idxs=layer_idxs)
-
-    if wtype in (WorkloadType.F, WorkloadType.R):
-        if sid == 0:
-            duration += gpc["EMB_F_TIME"]
-        elif sid == stage_num - 1 and not HEAD_DP:
-            duration += gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]
-        elif sid == stage_num and HEAD_DP:
-            duration = gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"]
-    elif wtype == WorkloadType.B:
-        recomp = 0
-        if sid == stage_num - 1:
-            duration += gpc["HEAD_B_TIME"] + gpc["CE_B_TIME"]
-            if recomp:
-                if not split_recomp:
-                    duration += (gpc["HEAD_F_TIME"] + gpc["CE_F_TIME"])
-            if not bwd_split:
-                duration += gpc["HEAD_W_TIME"]
-        elif sid == 0:
-            duration += gpc["EMB_B_TIME"]
-            if not bwd_split:
-                duration += gpc["EMB_W_TIME"]
-    elif wtype == WorkloadType.W:
-        if sid == stage_num - 1:
-            duration += gpc["HEAD_W_TIME"]
-        elif sid == 0:
-            duration += gpc["EMB_W_TIME"]
-    else:
-        raise ValueError(f"Wrong workload type: {wtype}.")
-    # return int(duration / comp_power) * gpc["MICRO_BATCH_TIME"][mid]
-    return int(duration / comp_power)
-
 class Stage:
-    
-    INTERLEAVED = 1
-    VSHAPE = 2
-    WAVELIKE = 3
 
-    def __init__(self,schedule_method, bwd_split: bool, device_id:int, stage_id: int, stage_num: int, para_num:int, stage_type: StageType, nmb:int, mid_offset:int, layer_num: int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, split_recomp: bool = False, comp_power: float = 1):
+    def __init__(self, stage_idx: int, total_stage_num: int, layer_num: int, device_idx:int, schedule_method, training_config: TrainingConfig , para_num:int, stage_type: StageType, mid_offset:int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, split_recomp: bool = False, comp_power: float = 1):
+        self.sid: int = stage_idx
+        self.did: int = device_idx
         self.schedule_method = schedule_method
-        self.bwd_split = bwd_split
-        self.did: int = device_id
-        self.sid: int = stage_id
-        self.stage_num: int = stage_num
-        self.nmb: int = nmb
+        self.total_stage_num  = total_stage_num
+        self.layer_num  = layer_num # Number of layers in this stage, only used when layerwise is False. If layerwise is True, it must be 1.
+
+        self.tc         = training_config
+        self.bwd_split  = self.tc.bwd_split
+        self.nmb        = self.tc.micro_batch_num
+        self.layer_f_times = self.tc.layer_f_times
+        self.layer_b_times = self.tc.layer_b_times
+        self.layer_w_times = self.tc.layer_w_times
+        self.tp_size = self.tc.tp_size
+        self.pp_size = self.tc.pp_size
+        self.total_layer_num = self.tc.layer_num
+        self.vocab_parallel = self.tc.vocab_parallel
+        self.fp16 = self.tc.fp16
+        self.fp32 = self.tc.fp32
+
         self.mid_offset: int = mid_offset
-        self.para_num: int = para_num / gpc["G"]
-        self.model_memory_usage = self.para_num * gpc["FP16"] / gpc["TP_SIZE"]
+        self.para_num: int = para_num / 1024**3
+        self.model_memory_usage = self.para_num * self.fp16 / self.tp_size
         self.grad_memory_usage = 0
         self.emb_memory_gradient_usage = 0
-        self.opt_memory_usage = self.para_num * 3 * gpc["FP32"] / gpc["TP_SIZE"] / gpc["ZERO_SIZE"]
+        self.opt_memory_usage = self.para_num * 3 * self.fp32 / self.tp_size / gpc["ZERO_SIZE"]
         self.memory_generated_by_mb : int = [0] * self.nmb
         self.memory_usage: int = self.model_memory_usage + self.grad_memory_usage + self.opt_memory_usage
         self.peak_memory_usage: int = self.model_memory_usage + self.grad_memory_usage + self.opt_memory_usage
@@ -93,57 +45,58 @@ class Stage:
         self.recomp = recomp
         self.split_recomp = split_recomp
         self.layerwise = layerwise
-        self.layer_num = layer_num
         self.layer_idx_start = layer_idx_start
-        self.layer_idxs = list(range(layer_idx_start, layer_idx_start + layer_num))
+        self.layer_idxs = list(range(layer_idx_start, layer_idx_start + self.layer_num))
         self.comp_power = comp_power
         if layerwise: 
-            assert layer_num == 1, f"LAYERWISE require 1 layer per stage but got {layer_num}"
+            assert self.layer_num == 1, f"LAYERWISE require 1 layer per stage but got {self.layer_num}"
         self._add_workload()
-        
+    
+    def get_workload_duration(self, wtype:WorkloadType)->float:
+        if wtype in (WorkloadType.F, WorkloadType.R):
+            duration = sum([self.layer_f_times[idx] for idx in self.layer_idxs])
+        elif wtype == WorkloadType.B:
+            duration = sum([self.layer_b_times[idx] for idx in self.layer_idxs])
+            if self.recomp:
+                if not self.split_recomp:
+                    duration += sum([self.layer_f_times[idx] for idx in self.layer_idxs])
+        elif wtype == WorkloadType.W:
+            duration = sum([self.layer_w_times[idx] for idx in self.layer_idxs])
+        else:
+            raise ValueError(f"Wrong workload type: {wtype}.")
+        return int(duration / self.comp_power)
+
     def _add_workload(self) -> None:
-        total_stages = gpc["LAYER_NUM"]+3 if self.layerwise else self.stage_num
-        if gpc["HEAD_DP"]:
-            total_stages = self.stage_num + 1
+        total_stages = self.total_layer_num + 3 if self.layerwise else self.total_stage_num
+        if self.vocab_parallel:
+            total_stages = self.total_stage_num + 1
         for mid in range(self.mid_offset, self.mid_offset + self.nmb):
-            if gpc["HEAD_DP"]:
-                if self.sid == self.stage_num and self.did == 0:
+            if self.vocab_parallel:
+                if self.sid == self.total_stage_num and self.did == 0:
                     # pass
                     continue
-                if self.sid == self.stage_num:
+                if self.sid == self.total_stage_num:
                     if mid == 0:
-                        if self.did != gpc["PP_SIZE"] - 1:
+                        if self.did != self.pp_size - 1:
                             continue
                     if mid == 8:
-                        if self.did != gpc["PP_SIZE"] - 3:
+                        if self.did != self.pp_size - 3:
                             continue
                     if mid == 9:
-                        if self.did != gpc["PP_SIZE"] - 2:
+                        if self.did != self.pp_size - 2:
                             continue
             self.workloads[mid] = {}
             fpw = Workload(
                 schedule_method = self.schedule_method,
                 bwd_split=self.bwd_split,
-                device_id=self.did,
-                stage_id=self.sid,
-                microbatch_id=mid,
+                device_idx=self.did,
+                stage_idx=self.sid,
+                microbatch_idx=mid,
                 wtype=WorkloadType.F,
-                duration=get_workload_duration(
-                    bwd_split=self.bwd_split,
-                    mid=mid,
-                    sid=self.sid,
-                    layer_wise=self.layerwise,
-                    layer_num=self.layer_num,
-                    stage_num=self.stage_num,
-                    wtype=WorkloadType.F,
-                    recomp=self.recomp,
-                    split_recomp=self.split_recomp,
-                    layer_idxs=self.layer_idxs,
-                    comp_power=self.comp_power,
-                ),
+                duration=self.get_workload_duration(wtype=WorkloadType.F),
                 recomp=self.recomp,
                 split_recomp=self.split_recomp,
-                total_stages=total_stages,
+                total_stage_num=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
             )
@@ -154,26 +107,14 @@ class Stage:
             igw = Workload(
                 schedule_method = self.schedule_method,
                 bwd_split=self.bwd_split,
-                device_id=self.did,
-                stage_id=self.sid,
-                microbatch_id=mid,
+                device_idx=self.did,
+                stage_idx=self.sid,
+                microbatch_idx=mid,
                 wtype=WorkloadType.B,
-                duration=get_workload_duration(
-                    bwd_split=self.bwd_split,
-                    mid=mid,
-                    sid=self.sid,
-                    layer_wise=self.layerwise,
-                    layer_num=self.layer_num,
-                    stage_num=self.stage_num,
-                    wtype=WorkloadType.B,
-                    recomp=self.recomp,
-                    split_recomp=self.split_recomp,
-                    layer_idxs=self.layer_idxs,
-                    comp_power=self.comp_power,
-                ), 
+                duration=self.get_workload_duration(wtype=WorkloadType.B),
                 recomp=self.recomp,
                 split_recomp=self.split_recomp,
-                total_stages=total_stages,
+                total_stage_num=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
             )
@@ -183,26 +124,14 @@ class Stage:
                     rfw = Workload(
                         schedule_method = self.schedule_method,
                         bwd_split=self.bwd_split,
-                        device_id=self.did,
-                        stage_id=self.sid,
-                        microbatch_id=mid,
+                        device_idx=self.did,
+                        stage_idx=self.sid,
+                        microbatch_idx=mid,
                         wtype=WorkloadType.R,
-                        duration=get_workload_duration(
-                        bwd_split=self.bwd_split,
-                            mid=mid,
-                            sid=self.sid,
-                            layer_wise=self.layerwise,
-                            layer_num=self.layer_num,
-                            stage_num=self.stage_num,
-                            wtype=WorkloadType.R,
-                            recomp=self.recomp,
-                            split_recomp=self.split_recomp,
-                            layer_idxs=self.layer_idxs,
-                            comp_power=self.comp_power,
-                        ), 
+                        duration=self.get_workload_duration(wtype=WorkloadType.R,),
                         recomp=self.recomp,
                         split_recomp=self.split_recomp,
-                        total_stages=total_stages,
+                        total_stage_num=total_stages,
                         layer_idxs=self.layer_idxs,
                         comp_power=self.comp_power,
                     )
@@ -212,26 +141,14 @@ class Stage:
                 pgw = Workload(
                     schedule_method = self.schedule_method,
                     bwd_split=self.bwd_split,
-                    device_id=self.did,
-                    stage_id=self.sid,
-                    microbatch_id=mid,
+                    device_idx=self.did,
+                    stage_idx=self.sid,
+                    microbatch_idx=mid,
                     wtype=WorkloadType.W,
-                    duration=get_workload_duration(
-                    bwd_split=self.bwd_split,
-                        mid=mid,
-                        sid=self.sid,
-                        layer_wise=self.layerwise,
-                        layer_num=self.layer_num,
-                        stage_num=self.stage_num,
-                        wtype=WorkloadType.W,
-                        recomp=self.recomp,
-                        split_recomp=self.split_recomp,
-                        layer_idxs=self.layer_idxs,
-                        comp_power=self.comp_power,
-                    ),
+                    duration=self.get_workload_duration(wtype=WorkloadType.W,),
                     split_recomp=self.split_recomp,
                     recomp=self.recomp,
-                    total_stages=total_stages,
+                    total_stage_num=total_stages,
                     layer_idxs=self.layer_idxs,
                     comp_power=self.comp_power,
                 )
@@ -254,7 +171,7 @@ class Stage:
             if self.sid == c_sid + 1:
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
                 return self.workloads[c_mid][c_wlt]
-            elif self.sid == c_sid and self.sid == constraint.total_stages - 1:
+            elif self.sid == c_sid and self.sid == constraint.total_stage_num - 1:
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
                 return self.workloads[c_mid][WorkloadType.B]
         elif c_wlt == WorkloadType.B:
@@ -300,7 +217,7 @@ class Stage:
             if self.sid == 0: # Including emb layer
                 self.memory_usage += Activation.EMB
             peak_memory = self.memory_usage
-            if self.sid == self.stage_num - 1:
+            if self.sid == self.total_stage_num - 1:
                 self.memory_usage += Activation.HEAD
                 self.memory_usage += Activation.LOSS / 2
                 peak_memory = self.memory_usage + Activation.LOSS / 2 # Need copy a FP32 logits
@@ -311,7 +228,7 @@ class Stage:
 
         elif workload.wtype == WorkloadType.W:
             if self.grad_memory_usage == 0:
-                self.grad_memory_usage = self.para_num * gpc["FP16"] / gpc["TP_SIZE"] # Para gradients
+                self.grad_memory_usage = self.para_num * self.fp16 / self.tp_size # Para gradients
                 if self.sid == 0: # Gradient is already stored
                     assert self.emb_memory_gradient_usage > 0, "W should after B."
                     self.grad_memory_usage -= self.emb_memory_gradient_usage
@@ -320,7 +237,7 @@ class Stage:
             else:
                 if self.sid != 0: # emb will be stored to the end
                     peak_memory += self.grad_memory_usage
-            if self.sid == self.stage_num - 1:
+            if self.sid == self.total_stage_num - 1:
                 self.memory_usage -= Activation.LOSS / 4 # Input gradient of head
             self.memory_usage -= (Activation.FULL * ACT_W_RATIO) * layers_per_stage
             self.memory_usage -= Gradient.INPUT * layers_per_stage
@@ -336,7 +253,7 @@ class Stage:
                         peak_memory = max(peak_memory, self.memory_usage)
                     if self.sid == 0:
                         self.memory_usage -= Activation.EMB
-                    if self.sid == self.stage_num - 1:
+                    if self.sid == self.total_stage_num - 1:
                         self.memory_usage -= Activation.HEAD * ACT_HEAD_B
                         self.memory_usage -= Activation.LOSS / 2
                         self.memory_usage += Activation.LOSS / 4 # Input gradient of head
@@ -347,10 +264,10 @@ class Stage:
                 if workload.wtype == WorkloadType.B:
                     self.memory_usage -= Activation.FULL * layers_per_stage
                     if self.grad_memory_usage == 0:
-                        self.grad_memory_usage = self.para_num * gpc["FP16"] / gpc["TP_SIZE"] # Para gradients
+                        self.grad_memory_usage = self.para_num * self.fp16 / self.tp_size # Para gradients
                         self.memory_usage += self.grad_memory_usage
                         peak_memory = self.memory_usage
-                    if self.sid == self.stage_num - 1:
+                    if self.sid == self.total_stage_num - 1:
                         self.memory_usage -= Activation.HEAD * ACT_HEAD_W
                         self.memory_usage -= Activation.LOSS
         self.peak_memory_usage = peak_memory

@@ -22,21 +22,24 @@ workload_type_mapping = {
 
 class PipelineScheduler:
 
-    def __init__(self, schedule_method, execute_strategy: ExecuteStrategy, pipeline_idx, bwd_split, nmb, mbs, bs, chunk_num, device_num, layer_num, time=0, mid_offset=None, placement=None, partition=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+    def __init__(self, pipeline_idx, schedule_method, training_config: TrainingConfig, time=0, mid_offset=None, placement=None, partition=None, run_schedule=False, comp_power:list=None, max_mem:list=None, executor=None) -> None:
+        self.pid = pipeline_idx
         self.schedule_method = schedule_method
-        self.bwd_split = bwd_split
+
+        self.tc         = training_config
+        self.bwd_split  = self.tc.bwd_split
+        self.chunk_num  = self.tc.chunk_num
+        self.device_num = self.tc.device_num
+        self.layer_num  = self.tc.layer_num
+        self.bs         = self.tc.batch_size
+        self.nmb        = self.tc.micro_batch_num
+        self.mbs        = self.tc.micro_batch_size
+
         self.executor = executor
-        self.execute_strategy = execute_strategy
-        self.chunk_num = chunk_num
-        self.device_num = device_num
-        self.layer_num = layer_num
         self.time = time
-        self.mbs = mbs
-        self.bs = bs
-        self.pipeline_idx = pipeline_idx # A flag for identifying each pipeline
+        
         self.results = {}
         self.devices: list[Device] = []
-        self.nmb = nmb
         self.mid_offset = pipeline_idx * self.nmb if not mid_offset else mid_offset
         self.solver_results = None
         self.comp_power = comp_power if comp_power else [1 for _ in range(self.device_num)]
@@ -189,25 +192,17 @@ class PipelineScheduler:
             self.results[f"theta_{idx}"] = r
 
     def _init_device(self):
-        layer_num = self.layer_num // self.stage_num
         for did in range(self.device_num):
             device = Device(
-                        schedule_method=self.schedule_method,
-                        bwd_split = self.bwd_split,
-                        did=did,
-                        nmb=self.nmb,
-                        execute_strategy=self.execute_strategy,
-                        layer_num=self.layer_num,
-                        device_num=self.device_num,
-                        chunk_num=self.chunk_num,
-                        stage_num=self.stage_num,
-                        mid_offset=self.mid_offset,
-                        mbs=self.mbs,
-                        bs=self.bs,
-                        max_mem=self.max_mem[did],
-                        comp_power=self.comp_power[did],
-                        pipeline=self,
-                    )
+                device_idx = did,
+                schedule_method = self.schedule_method,
+                training_config = self.tc,
+                stage_num   = self.stage_num,
+                mid_offset  = self.mid_offset,
+                max_mem     = self.max_mem[did],
+                comp_power  = self.comp_power[did],
+                pipeline    = self,
+            )
             self.devices.append(device)
         self.set_recomputation_config()
         assert self.placement and self.partition, "Placement and partition should be provided for initializing devices."
@@ -543,7 +538,6 @@ class PipelineScheduler:
         # NOTE: Add missed finished cases caused by transferring micro-batches to other pipelines
         if time > 0 and not self.finish_flag and idle_num == len(self.devices):
             self.finish_flag = True
-            # print(f"{time}: All devices are idle, set pipeline {self.pipeline_idx} as finished.")
 
     def run_pipeline_parallelism(self, time_limit = gpc["TIME_LIMIT"], show_utilization=True, show_mem=True, show_success=True):
         # self.run_schedule = False

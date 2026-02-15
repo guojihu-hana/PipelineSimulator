@@ -27,30 +27,28 @@ class Device:
     IDLE = 2
 
     def __init__(self, 
-                schedule_method, 
-                bwd_split, 
-                did: int, 
-                nmb:int, 
-                mid_offset:int, 
-                mbs:int, 
-                bs:int, 
-                layer_num: int, 
-                device_num: int, 
-                chunk_num: int, 
+                device_idx: int, 
+                schedule_method,
+                training_config: TrainingConfig, 
                 stage_num: int,
-                execute_strategy: ExecuteStrategy,
+                mid_offset:int, 
                 static_schedule: list = None, 
                 max_mem: int = 80, 
                 comp_power: float = 1, 
                 pipeline = None):
         
+        self.did = device_idx
         self.schedule_method = schedule_method
-        self.bwd_split = bwd_split
-        self.did = did
-        self.execute_strategy = execute_strategy
-        self.layer_num = layer_num
-        self.device_num = device_num
-        self.chunk_num = chunk_num
+        
+        self.tc         = training_config
+        self.bwd_split  = self.tc.bwd_split
+        self.layer_num  = self.tc.layer_num
+        self.device_num = self.tc.device_num
+        self.chunk_num  = self.tc.chunk_num
+        self.nmb        = self.tc.micro_batch_num
+        self.mbs        = self.tc.micro_batch_size
+        self.bs         = self.tc.batch_size
+        
         self.stage_num = stage_num
         self.warmup_end_flag = False
         self.warmup_diff = 1 if self.did != DEVICE_NUM - 1 else 0
@@ -65,10 +63,7 @@ class Device:
         self.current_workload: Workload = None
         self.current_mem_usage: int = 0
         self.peak_memory_usage: int = 0
-        self.nmb: int = nmb
         self.mid_offset: int = mid_offset
-        self.mbs : int = mbs
-        self.bs : int = bs
         self.held_mids: set = set(range(self.mid_offset, self.mid_offset + self.nmb))
         self.mem_usage_record: dict[int, int] = {}
         self.peak_mem_usage_record: dict[int, int] = {}
@@ -149,18 +144,18 @@ class Device:
     def get_initial_executable_workload(self, time)->list[Workload]:
         executable_workoads = []
         workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
-        if self.execute_strategy.switch_workload_type:
+        if self.tc.switch_workload_type:
             if self.last_wtype == WorkloadType.B:
                 workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
             if self.last_wtype == WorkloadType.F:
                 workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
 
-        if self.execute_strategy.save_memory and self.get_max_mem_did() == self.did and self.current_mem_usage > self.peak_memory_usage / 5 * 4:
+        if self.tc.save_memory and self.get_max_mem_did() == self.did and self.current_mem_usage > self.peak_memory_usage / 5 * 4:
             if self.last_wtype == WorkloadType.B:
                 workload_type_order = [WorkloadType.W,WorkloadType.F,WorkloadType.B]
             if self.last_wtype == WorkloadType.W:
                 workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
-        if self.execute_strategy.save_memory:
+        if self.tc.save_memory:
             head_ce_workloads = []
             for wtype in [WorkloadType.W]:
                 for mid in range(self.mid_offset, self.mid_offset + self.nmb):
@@ -180,7 +175,7 @@ class Device:
                     workloads = self.stages[sid].workloads
                     if mid in workloads and wtype in workloads[mid] and workloads[mid][wtype].is_executable(time=time):
                         workload = workloads[mid][wtype]
-                        if self.execute_strategy.overlap_aware and self.has_direct_dependency(time=time, workload=workload):
+                        if self.tc.overlap_aware and self.has_direct_dependency(time=time, workload=workload):
                             if self.is_bottleneck_device():
                                 delayed_workload.append(workloads[mid][wtype])
                             else:
@@ -198,13 +193,13 @@ class Device:
             return []
         
         workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
-        if self.execute_strategy.switch_workload_type:
+        if self.tc.switch_workload_type:
             if self.last_wtype == WorkloadType.B:
                 workload_type_order = [WorkloadType.F,WorkloadType.B,WorkloadType.W]
             if self.last_wtype == WorkloadType.F:
                 workload_type_order = [WorkloadType.B,WorkloadType.F,WorkloadType.W]
 
-        if self.execute_strategy.save_memory:
+        if self.tc.save_memory:
             if self.last_wtype == WorkloadType.B:
                 workload_type_order = [WorkloadType.W,WorkloadType.F,WorkloadType.B]
             if self.last_wtype == WorkloadType.W:
@@ -213,7 +208,7 @@ class Device:
         self.executable_workloads.set_type_order(workload_type_order)
         workload = self.executable_workloads.pop()
         delayed_workloads = []        
-        while len(self.executable_workloads) and self.execute_strategy.overlap_aware and self.has_direct_dependency(time=time, workload=workload):
+        while len(self.executable_workloads) and self.tc.overlap_aware and self.has_direct_dependency(time=time, workload=workload):
             delayed_workloads.append(workload)
             workload = self.executable_workloads.pop()
         
@@ -268,14 +263,13 @@ class Device:
                 para_num += Parameter.HEAD
 
         stage = Stage(
-                bwd_split = self.bwd_split,
                 schedule_method=self.schedule_method,
-                device_id=self.did, 
-                stage_id=stage_id,
-                stage_num=self.stage_num,
+                device_idx=self.did, 
+                stage_idx=stage_id,
+                total_stage_num=self.stage_num,
                 para_num=para_num,
+                training_config=self.tc,
                 stage_type=stage_type,
-                nmb=self.nmb,
                 mid_offset=self.mid_offset,
                 recomp=recomp,
                 layerwise=layerwise,
@@ -333,7 +327,7 @@ class Device:
                     sid = workload.sid
                     wtype = workload.wtype
                     
-                    if self.execute_strategy.constrain_warmup:
+                    if self.tc.constrain_warmup:
                         if self.exe_num_f < self.begin_warmup_num:
                             if wtype != WorkloadType.F:
                                 self.executable_workloads.push(workload)
@@ -545,9 +539,9 @@ class Device:
         return workload_type
 
     def update_memory_usage(self) -> int:
-        if self.current_workload.state == Workload.IN_PROGRESS and self.current_workload.wtype in (WorkloadType.F, WorkloadType.R, WorkloadType.B):
+        if self.current_workload.state == Workload.in_progress and self.current_workload.wtype in (WorkloadType.F, WorkloadType.R, WorkloadType.B):
             self.stages[self.current_workload.sid].update_memory_usage(workload=self.current_workload)
-        elif self.current_workload.state == Workload.COMPLETED and self.current_workload.wtype == WorkloadType.W:
+        elif self.current_workload.state == Workload.finished and self.current_workload.wtype == WorkloadType.W:
             self.stages[self.current_workload.sid].update_memory_usage(workload=self.current_workload)
         self.peak_memory_usage = sum(stage.peak_memory_usage for stage in self.stages.values())    
         self.current_mem_usage = sum(stage.memory_usage for stage in self.stages.values())

@@ -4,22 +4,22 @@ from .context import flush_fbw_time
 
 class Workload:
     # 定义状态常量
-    NOT_STARTED = 1
-    IN_PROGRESS = 2
-    COMPLETED = 3
+    not_started = 1
+    in_progress = 2
+    finished = 3
 
-    def __init__(self, schedule_method, device_id:int, microbatch_id: int, stage_id: int, bwd_split: bool, duration: int, total_stages:int, wtype: WorkloadType, recomp:bool, split_recomp:bool, layer_idxs:list, comp_power:float):
+    def __init__(self, schedule_method, device_idx:int, microbatch_idx: int, stage_idx: int, bwd_split: bool, duration: int, total_stage_num:int, wtype: WorkloadType, recomp:bool, split_recomp:bool, layer_idxs:list, comp_power:float):
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
-        self.did = device_id
-        self.mid: int = microbatch_id  # 微批次编号
-        self.sid: int = stage_id              # 阶段编号
+        self.did = device_idx
+        self.mid: int = microbatch_idx  # 微批次编号
+        self.sid: int = stage_idx              # 阶段编号
         self.duration: int = duration               # 任务所需时间
         self.start_time: float = None               # 初始开始时间为None
         self.end_time: float = None                 # 结束时间
-        self.state: int = Workload.NOT_STARTED      # 初始状态为未开始
+        self.state: int = Workload.not_started      # 初始状态为未开始
         self.ready_time: int = -1
-        self.total_stages: int = total_stages
+        self.total_stage_num: int = total_stage_num
         self.recomp:bool = recomp
         self.split_recomp:bool = split_recomp
         self.layer_idxs:list = layer_idxs
@@ -50,7 +50,7 @@ class Workload:
                         workload_type = WorkloadType.F)
                 )
         elif self.wtype == WorkloadType.B:
-            if self.sid + 1 < self.total_stages:
+            if self.sid + 1 < self.total_stage_num:
                 self.constraints.add(
                     WorkloadConstraint(
                         device_id = self.did+1,
@@ -62,7 +62,7 @@ class Workload:
                 self.constraints.add(
                     WorkloadConstraint(
                         device_id = self.did,
-                        stage_id=self.total_stages - 1, 
+                        stage_id=self.total_stage_num - 1, 
                         microbatch_id=self.mid, 
                         workload_type = WorkloadType.F)
                 )
@@ -98,12 +98,12 @@ class Workload:
             self._generate_communication(time, constraint)
 
     def is_executable(self, time):
-        return len(self.constraints) == 0 and self.ready_time <= time and self.state == Workload.NOT_STARTED
+        return len(self.constraints) == 0 and self.ready_time <= time and self.state == Workload.not_started
     
     def execute(self, time) -> bool:
-        if self.state == Workload.NOT_STARTED:
+        if self.state == Workload.not_started:
             if self.is_executable(time=time):
-                self.state = Workload.IN_PROGRESS
+                self.state = Workload.in_progress
                 self.start_time = time
                 self.end_time = self.start_time + self.duration
                 return True
@@ -111,14 +111,8 @@ class Workload:
 
     def complete(self, time) -> None:
         """完成任务并更新状态"""
-        if self.state == Workload.IN_PROGRESS and self.end_time <= time:
-            self.state = Workload.COMPLETED
-        
-    def is_head_w(self):
-        if self.wtype == WorkloadType.F:
-            if  gpc["LAYERWISE"] and self.sid == gpc["LAYER_NUM"] + 1:
-                return True
-        return False
+        if self.state == Workload.in_progress and self.end_time <= time:
+            self.state = Workload.finished
 
     @property
     def is_w(self):
@@ -139,5 +133,5 @@ class Workload:
     def __repr__(self):
         return (f"did={self.did}, mid={self.mid}, sid={self.sid}, wtype={self.wtype.name}, "
             f"duration={self.duration}, start_time={self.start_time}, end_time={self.end_time}, state={self.state}, "
-            f"ready_time={self.ready_time}, total_stages={self.total_stages}, "
+            f"ready_time={self.ready_time}, total_stages={self.total_stage_num}, "
             f"constraints={self.constraints}\n")
