@@ -441,11 +441,8 @@ class MultiPipelinePainter:
                 x1 = x0 + block_width
                 y1 = (self._pp_height + self._pp_align) * (did + dp_idx * self._device_size + 1) - pad + 5
 
-                # save schedule representation in painter
-                if HEAD_DP:
-                    schedule_res_content += "{}_{}_{}_{},{},{}\n".format(k,mid,pid,did,offset,offset+block_width)
-                else:
-                    schedule_res_content += "{}_{}_{},{},{}\n".format(k,mid,pid,offset,offset+block_width)
+
+                schedule_res_content += "{}_{}_{}_{},{},{}\n".format(k,mid,pid,did,offset,offset+block_width)
 
                 tag = f"p_{pid}_m_{mid}_{k}"
                 color = set_color(pid,workload_type=k,layer_num=self._pp_size)
