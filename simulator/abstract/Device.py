@@ -40,15 +40,17 @@ class Device:
         self.did = device_idx
         self.schedule_method = schedule_method
         
-        self.tc         = training_config
-        self.bwd_split  = self.tc.bwd_split
-        self.layer_num  = self.tc.layer_num
-        self.device_num = self.tc.device_num
-        self.chunk_num  = self.tc.chunk_num
-        self.nmb        = self.tc.micro_batch_num
-        self.mbs        = self.tc.micro_batch_size
-        self.bs         = self.tc.batch_size
-        
+        self.tc             = training_config
+        self.bwd_split      = self.tc.bwd_split
+        self.layer_num      = self.tc.layer_num
+        self.device_num     = self.tc.device_num
+        self.chunk_num      = self.tc.chunk_num
+        self.nmb            = self.tc.micro_batch_num
+        self.mbs            = self.tc.micro_batch_size
+        self.bs             = self.tc.batch_size
+        self.vocab_parallel = self.tc.vocab_parallel
+        self.placement      = pipeline.placement
+
         self.stage_num = stage_num
         self.warmup_end_flag = False
         self.warmup_diff = 1 if self.did != DEVICE_NUM - 1 else 0
@@ -256,10 +258,10 @@ class Device:
             if stage_id == 0:
                 basic_memory += StateMemory.EMB
                 para_num += Parameter.EMB
-            elif stage_id == self.stage_num - 1 and not gpc["HEAD_DP"]:
+            elif stage_id == self.stage_num - 1 and not self.vocab_parallel:
                 basic_memory += StateMemory.HEAD
                 para_num += Parameter.HEAD
-            elif stage_id == self.stage_num and gpc["HEAD_DP"]:
+            elif stage_id == self.stage_num and self.vocab_parallel:
                 para_num += Parameter.HEAD
 
         stage = Stage(
@@ -276,6 +278,7 @@ class Device:
                 layer_num=layer_num,
                 layer_idx_start=layer_idx_start,
                 comp_power=self.comp_power,
+                placement = self.placement,
             )
         self.stages[stage.sid] = stage
         self.total_layers+=layer_num

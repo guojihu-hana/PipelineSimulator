@@ -34,6 +34,7 @@ class PipelineScheduler:
         self.bs         = self.tc.batch_size
         self.nmb        = self.tc.micro_batch_num
         self.mbs        = self.tc.micro_batch_size
+        self.vocab_parallel = self.tc.vocab_parallel
 
         self.executor = executor
         self.time = time
@@ -89,47 +90,12 @@ class PipelineScheduler:
             assert self.layer_num == sum(partition), f"Layer num should be equal to the sum of partition ({self.layer_num} != {sum(partition)})."
             assert len(placement) == self.device_num, f"Placement length should be equal to device num ({len(placement)} != {self.device_num})."
             assert len(partition) == sum([len(p) for p in placement]), f"Partition length should be equal to the total number of stages in placement ({len(partition)} != {sum([len(p) for p in placement])})."
-            self.stage_num = len(partition)
+            self.stage_num = max([stage for p in placement for stage in p]) + 1
             self.partition = partition
             self.placement = placement
         else:
             assert placement is None and partition is None, "Either both placement and partition should be provided, or neither of them should be provided."
         print(f"-- Initialize {self.schedule_method.name} placement: {self.placement} and partition : {self.partition} successfully.")
-
-    def set_model_partition_and_placement(self):
-        self.partition = get_octopipe_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
-        if self.schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB, Schedule.ReCycle):
-            self.partition = [self.layer_num // self.device_num] * self.device_num
-        if self.schedule_method == Schedule.Mist:
-            self.partition = get_mist_predefined_partition_placement(seq_len=SEQ_LEN, device_num=self.device_num, layer_num=self.layer_num)
-            self.schedule_method = Schedule.STANDARD_1F1B
-
-        self.placement = [
-            [1 for _ in range(layer_num)] for layer_num in self.partition
-        ]
-
-        if self.schedule_method == Schedule.OctoPipe:
-            computation_times = [f + b + w for f, b, w in zip(gpc["F_TIMES"], gpc["B_TIMES"], gpc["W_TIMES"])]
-            computation_times[-1] += gpc["HEAD_F_TIME"] + gpc["HEAD_B_TIME"] + gpc["HEAD_W_TIME"]
-            if self.stage_num == self.layer_num:
-                solver_results = solve_unordered(
-                    times=computation_times, 
-                    D=self.device_num,
-                    mems=[1 for _ in range(self.layer_num)], 
-                    mem_limits=[144 for _ in range(self.device_num)]
-                )
-            else:
-                solver_results = solve_ordered(
-                    times=computation_times, 
-                    D=self.device_num,
-                    mems=[1 for _ in range(self.layer_num)], 
-                    mem_limits=[144 for _ in range(self.device_num)]
-                )
-            self.solver_results = solver_results
-            self.placement = solver_results["assignments"]
-            self.partition = [len(p) for p in self.placement]
-
-        self.save_partition()
 
     def save_partition(self):
         with open("schedule_results/partition.txt", 'w') as f:
@@ -212,7 +178,14 @@ class PipelineScheduler:
                 layer_num = self.partition[sid]
                 self.devices[did].add_stage(stage_id=sid, layer_num=layer_num, layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
                 layer_idx_start += layer_num
+        if self.vocab_parallel:
+            for did in range(self.device_num):
+                self.devices[did].add_stage(self.stage_num, layer_num=1, layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
         
+        print(f"Initialize devices and stages successfully with placement {self.placement} and partition {self.partition}.")
+        for device in self.devices:
+            print(f"Device {device.did} has stages {list(device.stages.keys())} with layer nums {[device.stages[sid].layer_num for sid in device.stages.keys()]}.")
+
         if self.head_dp:
             for device in self.devices:
                 device.add_stage(self.stage_num, False, False, 0)
@@ -502,10 +475,12 @@ class PipelineScheduler:
         for device in self.devices:
             if device.state == Device.BUSY and time >= device.current_workload.end_time:
                 if device.current_workload.wtype == WorkloadType.W:
-                    self.num_finished_microbatch += 1
-                elif not self.bwd_split and device.current_workload.wtype == WorkloadType.B:
-                    if device.current_workload.duration > 0:
+                    if device.current_workload.sid < self.stage_num:
                         self.num_finished_microbatch += 1
+                elif not self.bwd_split and device.current_workload.wtype == WorkloadType.B:
+                    if device.current_workload.sid < self.stage_num:
+                        if device.current_workload.duration > 0:
+                            self.num_finished_microbatch += 1
                 self.workload_execute_record[device.current_workload.did].append(device.current_workload)
 
                 device.current_workload.complete(time=time)

@@ -122,7 +122,7 @@ class WorkloadConstraint:
         self.sid: int = stage_id              # 阶段编号
         self.workload_type: WorkloadType = workload_type  # 工作负载类型
 
-        self._hash = hash((self.mid, self.sid, self.workload_type))
+        self._hash = hash((self.did, self.mid, self.sid, self.workload_type))
 
     def __eq__(self, other):
         if not isinstance(other, WorkloadConstraint):
@@ -130,6 +130,7 @@ class WorkloadConstraint:
         return (
             self.mid == other.mid 
             and self.sid == other.sid
+            and self.did == other.did
             and self.workload_type == other.workload_type
         )
     

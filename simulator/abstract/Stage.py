@@ -11,7 +11,7 @@ class StageType:
 
 class Stage:
 
-    def __init__(self, stage_idx: int, total_stage_num: int, layer_num: int, device_idx:int, schedule_method, training_config: TrainingConfig , para_num:int, stage_type: StageType, mid_offset:int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, split_recomp: bool = False, comp_power: float = 1):
+    def __init__(self, stage_idx: int, total_stage_num: int, layer_num: int, device_idx:int, schedule_method, training_config: TrainingConfig , para_num:int, stage_type: StageType, mid_offset:int, layer_idx_start: int, layerwise:bool = False, recomp: bool = False, split_recomp: bool = False, comp_power: float = 1, placement = None):
         self.sid: int = stage_idx
         self.did: int = device_idx
         self.schedule_method = schedule_method
@@ -30,6 +30,7 @@ class Stage:
         self.vocab_parallel = self.tc.vocab_parallel
         self.fp16 = self.tc.fp16
         self.fp32 = self.tc.fp32
+        self.placement = placement
 
         self.mid_offset: int = mid_offset
         self.para_num: int = para_num / 1024**3
@@ -71,20 +72,6 @@ class Stage:
         if self.vocab_parallel:
             total_stages = self.total_stage_num + 1
         for mid in range(self.mid_offset, self.mid_offset + self.nmb):
-            if self.vocab_parallel:
-                if self.sid == self.total_stage_num and self.did == 0:
-                    # pass
-                    continue
-                if self.sid == self.total_stage_num:
-                    if mid == 0:
-                        if self.did != self.pp_size - 1:
-                            continue
-                    if mid == 8:
-                        if self.did != self.pp_size - 3:
-                            continue
-                    if mid == 9:
-                        if self.did != self.pp_size - 2:
-                            continue
             self.workloads[mid] = {}
             fpw = Workload(
                 schedule_method = self.schedule_method,
@@ -99,10 +86,10 @@ class Stage:
                 total_stage_num=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
+                vocab_parallel=self.vocab_parallel,
+                placement=self.placement,
             )
             self.workloads[mid][WorkloadType.F] = fpw
-            if self.sid == 0 and self.layerwise: # Embedding layer only has F
-                continue
 
             igw = Workload(
                 schedule_method = self.schedule_method,
@@ -117,8 +104,11 @@ class Stage:
                 total_stage_num=total_stages,
                 layer_idxs=self.layer_idxs,
                 comp_power=self.comp_power,
+                vocab_parallel=self.vocab_parallel,                
+                placement=self.placement,
             )
             self.workloads[mid][WorkloadType.B] = igw
+
             if self.recomp:
                 if self.split_recomp:
                     rfw = Workload(
@@ -134,6 +124,8 @@ class Stage:
                         total_stage_num=total_stages,
                         layer_idxs=self.layer_idxs,
                         comp_power=self.comp_power,
+                        vocab_parallel=self.vocab_parallel,
+                        placement=self.placement,
                     )
                     self.workloads[mid][WorkloadType.R] = rfw
 
@@ -151,6 +143,8 @@ class Stage:
                     total_stage_num=total_stages,
                     layer_idxs=self.layer_idxs,
                     comp_power=self.comp_power,
+                    vocab_parallel=self.vocab_parallel,
+                    placement=self.placement,
                 )
                 if self.stage_type == StageType.CE: # Cross-entropy layer has no W for parameter training
                     continue

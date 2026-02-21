@@ -1,6 +1,5 @@
 from .mutils import *
 from .context import global_context as gpc
-from .context import flush_fbw_time
 
 class Workload:
     # 定义状态常量
@@ -8,7 +7,7 @@ class Workload:
     in_progress = 2
     finished = 3
 
-    def __init__(self, schedule_method, device_idx:int, microbatch_idx: int, stage_idx: int, bwd_split: bool, duration: int, total_stage_num:int, wtype: WorkloadType, recomp:bool, split_recomp:bool, layer_idxs:list, comp_power:float):
+    def __init__(self, schedule_method, device_idx:int, microbatch_idx: int, stage_idx: int, bwd_split: bool, duration: int, total_stage_num:int, wtype: WorkloadType, recomp:bool, split_recomp:bool, layer_idxs:list, comp_power:float, vocab_parallel:bool, placement):
         self.schedule_method = schedule_method
         self.bwd_split = bwd_split
         self.did = device_idx
@@ -24,6 +23,9 @@ class Workload:
         self.split_recomp:bool = split_recomp
         self.layer_idxs:list = layer_idxs
         self.comp_power = comp_power
+        self.vocab_parallel = vocab_parallel
+        self.placement = placement
+
         if self.mid == 0 and self.sid == 0:
             self.ready_time = 0
         self.wtype: WorkloadType = wtype  # 工作负载类型
@@ -31,57 +33,73 @@ class Workload:
         self.constraints: set = set()               # {(i1, j1, C1), ...}表示Stage i1 上的Microbatch j1 的 C1 操作是前置约束
         self._generate_constraints()
 
+    def sid2did(self, sid):
+        dids = []
+        for did, sids in enumerate(self.placement):
+            if sid in sids:
+                dids.append(did)
+            if self.vocab_parallel and self.wtype == WorkloadType.B and sid == self.total_stage_num - 1:
+                dids.append(did)
+
+        return dids
+
     def _generate_constraints(self):
         if self.wtype == WorkloadType.F:
             if self.sid > 0:
-                self.constraints.add(
-                    WorkloadConstraint(
-                        device_id = self.did,
-                        microbatch_id = self.mid,
-                        stage_id = self.sid - 1,
-                        workload_type = WorkloadType.F)
-                )
+                for did in self.sid2did(self.sid - 1):
+                    self.constraints.add(
+                        WorkloadConstraint(
+                            device_id = did,
+                            microbatch_id = self.mid,
+                            stage_id = self.sid - 1,
+                            workload_type = WorkloadType.F)
+                    )
         elif self.wtype == WorkloadType.R:
-            self.constraints.add(
-                    WorkloadConstraint(
-                        device_id = self.did,
-                        microbatch_id = self.mid,
-                        stage_id = self.sid,
-                        workload_type = WorkloadType.F)
-                )
+            for did in self.sid2did(self.sid):
+                self.constraints.add(
+                        WorkloadConstraint(
+                            device_id = did,
+                            microbatch_id = self.mid,
+                            stage_id = self.sid,
+                            workload_type = WorkloadType.F)
+                    )
         elif self.wtype == WorkloadType.B:
             if self.sid + 1 < self.total_stage_num:
-                self.constraints.add(
-                    WorkloadConstraint(
-                        device_id = self.did+1,
-                        stage_id = self.sid+1, 
-                        microbatch_id= self.mid, 
-                        workload_type = WorkloadType.B if not (self.schedule_method in (Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED) and self.bwd_split == True) else WorkloadType.W)
-                )
+                for did in self.sid2did(self.sid + 1):
+                    self.constraints.add(
+                        WorkloadConstraint(
+                            device_id = did,
+                            stage_id = self.sid+1, 
+                            microbatch_id= self.mid, 
+                            workload_type = WorkloadType.B if not (self.schedule_method in (Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED) and self.bwd_split == True) else WorkloadType.W)
+                    )
             else:
-                self.constraints.add(
-                    WorkloadConstraint(
-                        device_id = self.did,
-                        stage_id=self.total_stage_num - 1, 
-                        microbatch_id=self.mid, 
-                        workload_type = WorkloadType.F)
-                )
+                for did in self.sid2did(self.total_stage_num - 1):
+                    self.constraints.add(
+                        WorkloadConstraint(
+                            device_id = did,
+                            stage_id=self.total_stage_num - 1, 
+                            microbatch_id=self.mid, 
+                            workload_type = WorkloadType.F)
+                    )
             if self.recomp and self.split_recomp:
+                for did in self.sid2did(self.sid):
+                    self.constraints.add(
+                        WorkloadConstraint(
+                            device_id = did,
+                            stage_id=self.sid, 
+                            microbatch_id=self.mid, 
+                            workload_type = WorkloadType.R)
+                    )
+        elif self.wtype == WorkloadType.W:
+            for did in self.sid2did(self.sid):
                 self.constraints.add(
                     WorkloadConstraint(
-                        device_id = self.did,
+                        device_id = did,
                         stage_id=self.sid, 
                         microbatch_id=self.mid, 
-                        workload_type = WorkloadType.R)
+                        workload_type=WorkloadType.B)
                 )
-        elif self.wtype == WorkloadType.W:
-            self.constraints.add(
-                WorkloadConstraint(
-                    device_id = self.did,
-                    stage_id=self.sid, 
-                    microbatch_id=self.mid, 
-                    workload_type=WorkloadType.B)
-            )
 
     def _generate_communication(self, time, constraint: WorkloadConstraint):
         if constraint.did != self.did:

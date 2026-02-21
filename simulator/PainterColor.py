@@ -31,6 +31,15 @@ def set_color(sid, workload_type, layer_num, layer_wise = LAYERWISE):
         color = "#B0E8D3"
     elif workload_type == 'r':
         color = "#F8CECC"
+    if sid == layer_num:
+        if workload_type == 'f':    #颜色设置，加上w的情况
+            color = "#f5b482" # deep color
+        elif workload_type == 'b':
+            color = "#E1D5E7" # deep color
+        elif workload_type == 'w':
+            color = "#7ddfd7"
+        elif workload_type == 'r':
+            color = "#F8CECC"
 
     if RUN_MODE == RunMode.LAYERWISE_GUROBI_SOLVE or layer_wise:
         if sid == 0:

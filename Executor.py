@@ -621,7 +621,7 @@ class Executor:
             painter_conf = {
                 "device_num": pipeline.device_num,
                 "devices": pipeline.placement,
-                "stage_num": pipeline.stage_num if not gpc["HEAD_DP"] else pipeline.stage_num + 1,
+                "stage_num": pipeline.stage_num,
                 "pp_height": gpc["PP_HEIGHT"],
                 "pp_align": gpc["PP_ALIGN"],
                 "pixel_base": gpc["PIXEL_BASE"],
@@ -637,29 +637,36 @@ class Executor:
             res_all_dp["painter_conf"][dp_idx]["w_times"] = dict_to_2d_list(all_dp_w_times)
         MPP(res_all_dp["painter_conf"]).draw(res_all_dp["res"])
 
+def preprocess_head_times(times, vocab_parallel=False):
+    if not vocab_parallel:
+        return times
+    head_plus_one_layer = times[-1]
+    one_layer = times[-2]
+    head_time = head_plus_one_layer - one_layer
+    times.pop()
+    times.append(one_layer)
+    times.append(head_time / gpc["DEVICE_NUM"])
+    return times
+
 if __name__ == "__main__":
     random.seed(1024)
-    # Example
     chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
     chunk_num = 1
     schedule_method = Schedule.OctoPipe
     # schedule_method = Schedule.STANDARD_1F1B
-    # schedule_method = Schedule.STANDARD_ZBH
-    # schedule_method = Schedule.STANDARD_INTERLEAVED
     bwd_split = False
     if schedule_method == Schedule.STANDARD_ZBH:
         bwd_split = True
     if schedule_method == Schedule.STANDARD_INTERLEAVED:
         chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
-        # chunk_num = 2
-        # bwd_split = False
     
+    vocab_parallel = True
     tc = TrainingConfig(
         pp_size=gpc["DEVICE_NUM"],
         tp_size=1,
         dp_size=1,
         bwd_split=bwd_split,
-        vocab_parallel  =False,
+        vocab_parallel  =   vocab_parallel,
         overlap_aware   =   gpc["OVERLAP_AWARE_SCHEDULE"],
         save_memory     =   gpc["SAVE_MEMORY"],
         constrain_warmup    =   gpc["CONSTRAIN_WARMUP"],
@@ -669,9 +676,9 @@ if __name__ == "__main__":
         device_num=gpc["DEVICE_NUM"],
         micro_batch_num=gpc["MICRO_BATCH_NUM"],
         micro_batch_size=gpc["MICRO_BATCH_SIZE"],
-        layer_f_times=gpc["F_TIMES"],
-        layer_b_times=gpc["B_TIMES"],
-        layer_w_times=gpc["W_TIMES"],
+        layer_f_times=preprocess_head_times(gpc["F_TIMES"], vocab_parallel),
+        layer_b_times=preprocess_head_times(gpc["B_TIMES"], vocab_parallel),
+        layer_w_times=preprocess_head_times(gpc["W_TIMES"], vocab_parallel),
     )
     executor = Executor(
         schedule_method=schedule_method, 
@@ -701,14 +708,16 @@ if __name__ == "__main__":
         placement = [[0], [1], [2], [3], [4], [5], [6], [7]]
         partition = [16, 18, 17, 5]
         placement = [[0], [1], [2], [3]]
-        partition = [8, 8, 8, 7, 8, 8, 8, 1]
-        partition = [6, 6, 7, 6, 10, 10, 10, 1]
-        placement = [[0,4], [1,5], [2,6], [3,7]]
-        partition = [7, 8, 10, 10, 9, 8, 4]
-        placement = [[0,3], [1,4], [2,5], [6]]
-
-        partition = [8, 7, 7, 6]
+        partition = [14, 14, 14, 14] # vocab para
         placement = [[0], [1], [2], [3]]
+        # partition = [8, 8, 8, 7, 8, 8, 8, 1]
+        # partition = [6, 6, 7, 6, 10, 10, 10, 1]
+        # placement = [[0,4], [1,5], [2,6], [3,7]]
+        # partition = [7, 8, 10, 10, 9, 8, 4]
+        # placement = [[0,3], [1,4], [2,5], [6]]
+
+        # partition = [8, 7, 7, 6]
+        # placement = [[0], [1], [2], [3]]
         # partition = None
         # placement = None
         executor.one_step_tuning(time_limit=100000, placement=placement, partition=partition)
