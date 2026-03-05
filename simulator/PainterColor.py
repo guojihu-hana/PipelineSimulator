@@ -34,10 +34,13 @@ def set_color(sid, workload_type, layer_num, layer_wise = LAYERWISE):
     if sid == layer_num:
         if workload_type == 'f':    #颜色设置，加上w的情况
             color = "#f5b482" # deep color
+            color = "#FFECAF"
         elif workload_type == 'b':
             color = "#E1D5E7" # deep color
+            color = "#B7D0FC"
         elif workload_type == 'w':
             color = "#7ddfd7"
+            color = "#B0E8D3"
         elif workload_type == 'r':
             color = "#F8CECC"
 

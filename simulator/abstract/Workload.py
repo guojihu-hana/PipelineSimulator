@@ -92,14 +92,13 @@ class Workload:
                             workload_type = WorkloadType.R)
                     )
         elif self.wtype == WorkloadType.W:
-            for did in self.sid2did(self.sid):
-                self.constraints.add(
-                    WorkloadConstraint(
-                        device_id = did,
-                        stage_id=self.sid, 
-                        microbatch_id=self.mid, 
-                        workload_type=WorkloadType.B)
-                )
+            self.constraints.add(
+                WorkloadConstraint(
+                    device_id = self.did,
+                    stage_id=self.sid, 
+                    microbatch_id=self.mid, 
+                    workload_type=WorkloadType.B)
+            )
 
     def _generate_communication(self, time, constraint: WorkloadConstraint):
         if constraint.did != self.did:

@@ -441,6 +441,9 @@ class Executor:
         
         for pipeline in self.pipelines:
             pipeline.print_device_utilization(self.get_time())
+        
+        for pipeline in self.pipelines:
+            pipeline.save_partition()
 
     def iterative_tuning(self, iter_limit=100, time_limit = gpc["TIME_LIMIT"], show_utilization=True, show_mem=True, show_success=True, show_partition=True, show_placement=True, tune_strategy=0):
         it = 0
@@ -551,8 +554,6 @@ class Executor:
         best_placement = [[lid for lid in range(did, LAYER_NUM, self.device_num)] for did in range(self.device_num)]
         print(best_placement)
         self.one_step_tuning(time_limit=time_limit, placement=best_placement)
-        for pipeline in self.pipelines:
-            pipeline.save_partition()
         print(f"Time {worst_time} -> {best_time}")
 
     def run_all_dp(self, time_limit = gpc["TIME_LIMIT"], show_utilization=True, show_mem=False, show_success=True, show_partition=False, show_placement=False):
@@ -653,10 +654,16 @@ if __name__ == "__main__":
     chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
     chunk_num = 1
     schedule_method = Schedule.OctoPipe
+    # schedule_method = Schedule.STANDARD_ZBH
+    # schedule_method = Schedule.STANDARD_INTERLEAVED
     # schedule_method = Schedule.STANDARD_1F1B
-    bwd_split = False
+    
+    bwd_split = True
     if schedule_method == Schedule.STANDARD_ZBH:
         bwd_split = True
+    if bwd_split:
+        gpc["B_TIMES"] = [time * 0.5 for time in gpc["B_TIMES"]]
+        gpc["W_TIMES"] = [time for time in gpc["B_TIMES"]]
     if schedule_method == Schedule.STANDARD_INTERLEAVED:
         chunk_num = gpc["LAYER_NUM"] // gpc["DEVICE_NUM"]
     
@@ -674,7 +681,7 @@ if __name__ == "__main__":
         layer_num=gpc["LAYER_NUM"],
         chunk_num=chunk_num,
         device_num=gpc["DEVICE_NUM"],
-        micro_batch_num=gpc["MICRO_BATCH_NUM"],
+        micro_batch_num=8,
         micro_batch_size=gpc["MICRO_BATCH_SIZE"],
         layer_f_times=preprocess_head_times(gpc["F_TIMES"], vocab_parallel),
         layer_b_times=preprocess_head_times(gpc["B_TIMES"], vocab_parallel),
@@ -708,15 +715,37 @@ if __name__ == "__main__":
         placement = [[0], [1], [2], [3], [4], [5], [6], [7]]
         partition = [16, 18, 17, 5]
         placement = [[0], [1], [2], [3]]
-        partition = [14, 14, 14, 14] # vocab para
+        
+        partition = [14, 14, 14, 14]
         placement = [[0], [1], [2], [3]]
-        # partition = [8, 8, 8, 7, 8, 8, 8, 1]
-        # partition = [6, 6, 7, 6, 10, 10, 10, 1]
-        # placement = [[0,4], [1,5], [2,6], [3,7]]
-        # partition = [7, 8, 10, 10, 9, 8, 4]
-        # placement = [[0,3], [1,4], [2,5], [6]]
+        # partition = [16, 18, 17, 5]
+        # placement = [[] for _ in range(DEVICE_NUM)]
+        # did = 0
+        # for stage in range(sum(partition) - 1):  # 先分配 0~54
+        #     while len(placement[did]) >= partition[did]:
+        #         did = (did + 1) % len(placement)
+        #     placement[did].append(stage)
+        #     did = (did + 1) % len(placement)
+        # # 最后一层 55 强制放在最后一行
+        # placement[-1].append(55)
+        # partition = [1 for _ in range(56)]
+        # placement = [
+        #     [0, 3, 4, 8, 12, 16, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50],
+        #     [1, 5, 9, 11, 13, 17, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51, 53],
+        #     [2, 6, 7, 10, 14, 18, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 54],
+        #     [15, 19, 55],
+        # ]
+        partition = [1 for _ in range(LAYER_NUM)]
+        placement = [[i + j * DEVICE_NUM for j in range(LAYER_NUM//DEVICE_NUM) ] for i in range(DEVICE_NUM)]
+        # partition = [14, 14, 14, 14] # vocab para
+        # placement = [[0], [1], [2], [3]]
+        # # partition = [8, 8, 8, 7, 8, 8, 8, 1]
+        # # partition = [6, 6, 7, 6, 10, 10, 10, 1]
+        # # placement = [[0,4], [1,5], [2,6], [3,7]]
+        # # partition = [7, 8, 10, 10, 9, 8, 4]
+        # # placement = [[0,3], [1,4], [2,5], [6]]
 
-        # partition = [8, 7, 7, 6]
+        # partition = [10, 10, 10, 10]
         # placement = [[0], [1], [2], [3]]
         # partition = None
         # placement = None

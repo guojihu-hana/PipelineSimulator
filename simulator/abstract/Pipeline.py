@@ -85,6 +85,7 @@ class PipelineScheduler:
             self.placement = [[i] for i in range(self.device_num)]
             if placement != self.placement:
                 print("Warning: Mist schedule should use partition-based placement, provided placement will be ignored.")
+            self.stage_num = max([stage for p in placement for stage in p]) + 1
             self.schedule_method = Schedule.STANDARD_1F1B
         elif placement and partition:
             assert self.layer_num == sum(partition), f"Layer num should be equal to the sum of partition ({self.layer_num} != {sum(partition)})."
