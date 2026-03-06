@@ -1,4 +1,4 @@
-from .mutils import *
+from .variables import WorkloadType, WorkloadConstraint, Schedule
 from .context import global_context as gpc
 
 class Workload:

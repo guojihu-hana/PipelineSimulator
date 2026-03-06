@@ -1,7 +1,57 @@
 import random
 from dataclasses import dataclass
-from simulator.abstract.variables import *
-from simulator.model_config import *
+from simulator.abstract.variables import (
+    Schedule, Placement, RunMode
+)
+
+# --------------------- Unit constants ---------------------
+G = 1024 * 1024 * 1024
+M = 1024 * 1024
+K = 1024
+B = G
+
+# --------------------- Model config ---------------------
+DEVICE_NUM = 4 * 2
+# 自定义模型
+VOCAB_SIZE = 92544
+NUM_ATTENTION_HEAD = 32
+SEQ_LEN = 4 * K
+HIDDEN_SIZE = 4 * K
+LAYER_NUM = 4 * 4 * 1
+MICRO_BATCH_SIZE = 1
+MICRO_BATCH_NUM = 4 * 4 * 1
+
+WORLD_SIZE = DEVICE_NUM
+PP_SIZE = DEVICE_NUM
+TP_SIZE = 1
+MODEL_TYPE = "GPT"
+
+VOCAB_SIZE = 256000
+DEVICE_NUM = 4 * 1
+HIDDEN_SIZE = 1.5 * K
+SEQ_LEN = 4 * K
+LAYER_NUM = 56
+NUM_ATTENTION_HEAD=32
+PP_SIZE = DEVICE_NUM
+TP_SIZE = 8
+ZERO_SIZE = 1
+CHUNK_NUM = LAYER_NUM // DEVICE_NUM
+CHUNK_NUM = 1
+GEMMA=True
+DEEPSEEK=False
+NEMOTRONH=False
+
+# N_SCALE default (only set in NemotronH configs)
+N_SCALE = 1
+
+# MLP_RATIO / INTER_SIZE defaults (set by LLAMA/Qwen configs above)
+if 'MLP_RATIO' not in dir():
+    MLP_RATIO = 4
+if 'INTER_SIZE' not in dir():
+    INTER_SIZE = HIDDEN_SIZE * MLP_RATIO
+
+# --------------------- Model config ---------------------
+
 # --------------------- Solver config ---------------------
 BASE_SOLUTION = True
 RUN_MODE = RunMode.LAYERWISE_GUROBI_SOLVE
@@ -118,79 +168,6 @@ W_TIMES = [F_TIME] * LAYER_NUM
 F_TIMES[-1] += F_TIME // 2
 B_TIMES[-1] += 6
 
-
-if not IDEAL_SITUATION:
-    if GEMMA:
-        try:
-            from data.profiled_data import profiled_data
-            ratios = profiled_data["GEMMA"][HIDDEN_SIZE][SEQ_LEN][VOCAB_SIZE]
-            [tf_tf, tb_tf, tw_tf, _, _, _, hf_tf, hb_tf, hw_tf] = [round(r, 1) for r in ratios]
-            B_TIMES = [t*(tb_tf+tw_tf) for i,t in enumerate(F_TIMES)]
-            HEAD_F_TIME = F_TIME * hf_tf
-            HEAD_B_TIME = F_TIME * (hb_tf + hw_tf)
-            if SPLIT_BACKPROP:
-                B_TIMES = [t*tb_tf for i,t in enumerate(F_TIMES)]
-                W_TIMES = [t*tw_tf for i,t in enumerate(F_TIMES)]
-                HEAD_B_TIME = F_TIME * hb_tf
-                HEAD_W_TIME = F_TIME * hw_tf
-        except:
-            print("----- No profiled data! Use predefined ratios. -----")
-
-    if DEEPSEEK:
-        try:
-            from data.profiled_data import profiled_data
-            ratios = profiled_data["DEEPSEEK"][HIDDEN_SIZE][SEQ_LEN][VOCAB_SIZE]
-            [tf_tf, tb_tf, tw_tf, mf_tf, mb_tf, mw_tf, hf_tf, hb_tf, hw_tf] = [round(r, 1) for r in ratios]
-            B_TIMES = [t*(mb_tf+mw_tf) if i >= LAYER_NUM//PP_SIZE - 1  else t * (tb_tf+tw_tf) for i,t in enumerate(F_TIMES)]
-            HEAD_F_TIME = F_TIME * hw_tf
-            HEAD_B_TIME = F_TIME * (hb_tf+hw_tf)
-            if SPLIT_BACKPROP:
-                if tw_tf == 0:
-                    tw_tf = 0.2
-                    tb_tf -= tw_tf
-                B_TIMES = [t*mb_tf if i >= LAYER_NUM//PP_SIZE - 1  else t * tb_tf for i,t in enumerate(F_TIMES)]
-                W_TIMES = [t*mw_tf if i >= LAYER_NUM//PP_SIZE - 1  else t * tw_tf for i,t in enumerate(F_TIMES)]
-                HEAD_B_TIME = F_TIME * hb_tf
-                HEAD_W_TIME = F_TIME * hw_tf
-            F_TIMES = [t*mf_tf if i >= LAYER_NUM//PP_SIZE - 1 else t for i,t in enumerate(F_TIMES)]
-        except:
-            print("----- No profiled data! Use predefined ratios. -----")
-
-    if NEMOTRONH:
-        diff = 3 * N_SCALE
-        try:
-            from data.profiled_data import profiled_data
-            ratios = profiled_data["NEMOTRONH"][HIDDEN_SIZE][SEQ_LEN][VOCAB_SIZE]
-            [tf_mf, tb_mf, tw_mf, mf_mf, mb_mf, mw_mf, hf_mf, hb_mf, hw_mf] = [round(r, 1) for r in ratios]
-            B_TIMES = [t*(tb_mf+tw_mf) if (i+1)%diff==0  else t * mb_mf for i,t in enumerate(F_TIMES)]
-            HEAD_F_TIME = F_TIME * hf_mf
-            HEAD_B_TIME = F_TIME * (hb_mf + hw_mf)
-            if SPLIT_BACKPROP:
-                B_TIMES = [t*tb_mf if (i+1)%diff==0  else t * (mb_mf-0.1) for i,t in enumerate(F_TIMES)]
-                W_TIMES = [t*tw_mf if (i+1)%diff==0  else t * 0.1 for i,t in enumerate(F_TIMES)]
-                HEAD_B_TIME = F_TIME * hb_mf
-                HEAD_W_TIME = F_TIME * hw_mf
-            F_TIMES = [t*tf_mf if (i+1)%diff==0 else t for i,t in enumerate(F_TIMES)]
-        except:
-            print("----- No profiled data! Use predefined ratios. -----")
-
-
-    if VARYLEN:
-        diff = 12
-        from data.profiled_data import profiled_data
-        ratios = profiled_data["NEMOTRONH"][HIDDEN_SIZE][SEQ_LEN][VOCAB_SIZE]
-        [tf_mf, tb_mf, tw_mf, mf_mf, mb_mf, mw_mf, hf_mf, hb_mf, hw_mf] = [round(r, 1) for r in ratios]
-        B_TIMES = [t*(tb_mf+tw_mf) if (i+1)%diff==0  else t * mb_mf for i,t in enumerate(F_TIMES)]
-        HEAD_F_TIME = F_TIME * hf_mf
-        HEAD_B_TIME = F_TIME * (hb_mf + hw_mf)
-        if SPLIT_BACKPROP:
-            B_TIMES = [t*tb_mf if (i+1)%diff==0  else t * (mb_mf-0.1) for i,t in enumerate(F_TIMES)]
-            W_TIMES = [t*tw_mf if (i+1)%diff==0  else t * 0.1 for i,t in enumerate(F_TIMES)]
-            HEAD_B_TIME = F_TIME * hb_mf
-            HEAD_W_TIME = F_TIME * hw_mf
-        F_TIMES = [t*tf_mf if (i+1)%diff==0 else t for i,t in enumerate(F_TIMES)]
-        print("------ Test vary length sequence. -----")
-
 from data.profiled_data import stage_time
 MODEL_NAME = "gpt-oss-20B"
 LAYER_NUM=24
@@ -221,11 +198,6 @@ CE_W_TIME = 0
 SCHEDULE_UNIT = MICRO_BATCH_NUM // 1
 REVERSE_LAST_STAGES = False
 REVERSE_FIRST_STAGES = False
-# Run standard ZBV ---------------------
-# SCHEDULE_METHOD = Schedule.ZBV
-# RUN_SCHEDULE = False
-# RUN_STANDARD_ZBV = True
-# Run standard ZBV ---------------------
 DENSITY_MAX = 1
 DENSITY_MIN = 1
 # --------------------- Simulator config ---------------------
@@ -245,7 +217,7 @@ l = LAYER_NUM
 v = VOCAB_SIZE
 i = INTER_SIZE
 
-LAYER_PARA_NUM = 4 * h * h + 3 * h * i + 2 * h if MODEL_TYPE in ("LLAMA", "Qwen") else 12 * h * h + 13 * h 
+LAYER_PARA_NUM = 4 * h * h + 3 * h * i + 2 * h if MODEL_TYPE in ("LLAMA", "Qwen") else 12 * h * h + 13 * h
 HEAD_PARA_NUM = v * h
 PARAMETER_NUM = LAYER_PARA_NUM * LAYER_NUM + HEAD_PARA_NUM
 

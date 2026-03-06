@@ -1,4 +1,4 @@
-from ..config import *
+from ..config import GEMMA, DEEPSEEK, NEMOTRONH, VARYLEN, K
 def get_mist_predefined_partition_placement(seq_len, device_num, layer_num):
     if GEMMA:
         mist_layer_assignments = {

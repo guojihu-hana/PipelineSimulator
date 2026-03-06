@@ -5,7 +5,8 @@ import os
 import tkinter as tk
 from tkinter import font
 from .utils import parse_microbatch_key, save_to_file
-from .abstract.mutils import *
+from .abstract.context import global_context as gpc
+from .abstract.variables import RunMode
 from .PainterColor import set_color
 class LayerwiseSchedulingPainter:
     """Scheduling Painter"""
@@ -100,7 +101,7 @@ class LayerwiseSchedulingPainter:
         y_label = (0 + 30) // 2 + 5
 
         if self._max_time == -1:
-            if SPLIT_BACKPROP:
+            if gpc["SPLIT_BACKPROP"]:
                 self._max_time = (data[max_key] + self._backward_w_length[max_key_pid])//self._pixel_base
             else:
                 self._max_time = (data[max_key] + self._backward_b_length[max_key_pid])//self._pixel_base
@@ -111,7 +112,7 @@ class LayerwiseSchedulingPainter:
                 self._basic_forward_length[1], 
                 self._basic_backward_b_length[1], 
                 self._basic_backward_w_length[1], 
-                COMM_TIME
+                gpc["COMM_TIME"]
             ),
         )
 
@@ -169,7 +170,7 @@ class LayerwiseSchedulingPainter:
                 underline= (max(0,pid-1)) // self._device_size % 2,
                 weight= tk.font.NORMAL if (max(0,pid-1)) // self._device_size % 2 else tk.font.BOLD
             )
-            if SHOW_WORKLOAD_TEXT:
+            if gpc["SHOW_WORKLOAD_TEXT"]:
                 text = main_canvas.create_text(
                     (x0 + x1) // 2, (y0 + y1) // 2, text=f"{mid % self._num_microbatches}", font=bold_font
                 )
@@ -197,8 +198,8 @@ class LayerwiseSchedulingPainter:
             # 求余考虑virtual stage的情况
             self._item2mid[block] = mid
 
-        save_to_file(SCH_FILE_PATH, schedule_res_content, 'w')
-        save_to_file(TEMP_RES_PATH, schedule_res_content, 'w')
+        save_to_file(gpc["SCH_FILE_PATH"], schedule_res_content, 'w')
+        save_to_file(gpc["TEMP_RES_PATH"], schedule_res_content, 'w')
         
         # Register hook for highlighting execution block of this microbatch
         def _trigger_hook(event):
@@ -225,7 +226,7 @@ class LayerwiseSchedulingPainter:
                 for fb in ("f", "b", "w") #点击后的效果，加上w的判断
             ]
 
-            if RUN_MODE == RunMode.LAYERWISE_GUROBI_SOLVE:
+            if gpc["RUN_MODE"] == RunMode.LAYERWISE_GUROBI_SOLVE:
                 tags = [
                     f"p_{pid}_m_{self._item2mid[current_item]}_{fb}"
                     for pid in range(self._num_layer)

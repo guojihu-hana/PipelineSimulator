@@ -1,6 +1,11 @@
-from .Stage import *
-from ..utils import save_to_file
-# TODO rethinking the head memory cost
+from .Stage import Stage, StageType
+from .Workload import Workload
+from .mutils import TrainingConfig
+from .variables import WorkloadType, Schedule, OrderedQueue
+from ..config import (
+    Activation, Gradient, ACT_B_RATIO, StateMemory, Parameter,
+)
+
 def get_required_memory(stage_id, layer_num, wtype, recomp, stage_num, bwd_split):
     if wtype ==WorkloadType.F:
         required_memory = Activation.FULL * layer_num
@@ -53,7 +58,7 @@ class Device:
 
         self.stage_num = stage_num
         self.warmup_end_flag = False
-        self.warmup_diff = 1 if self.did != DEVICE_NUM - 1 else 0
+        self.warmup_diff = 1 if self.did != self.device_num - 1 else 0
         self.begin_warmup_num = (self.chunk_num - 1) * self.device_num + 1 + self.device_num - 1 - self.did + self.warmup_diff
         self.begin_warmup_num = (self.chunk_num - 1) * self.device_num + 1 + (self.device_num - 1 - self.did) * 2 + 1 + self.warmup_diff
         self.begin_warmup_num = (4 - self.did)

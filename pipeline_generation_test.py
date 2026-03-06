@@ -1,7 +1,10 @@
 import os
 import time
-from simulator.abstract.Pipeline import *
-from simulator.abstract.mutils import *
+from simulator.abstract.Pipeline import PipelineScheduler
+from simulator.abstract.mutils import TrainingConfig
+from simulator.abstract.variables import Schedule, Placement
+from simulator.abstract.context import global_context as gpc
+from simulator.utils import save_to_file
 
 def check_standard_zbv_conditions():
     if gpc["EMB_F_TIME"]!=0:
@@ -29,10 +32,10 @@ def clear_old_file(filepath:str):
         print("delete file:{}".format(filepath))
 
 def clear_old_files():
-    clear_old_file(SCH_FILE_PATH)
-    clear_old_file(TEMP_PLA_PATH)
-    clear_old_file(TEMP_RES_PATH)
-    for did in range(DEVICE_NUM):
+    clear_old_file(gpc["SCH_FILE_PATH"])
+    clear_old_file(gpc["TEMP_PLA_PATH"])
+    clear_old_file(gpc["TEMP_RES_PATH"])
+    for did in range(gpc["DEVICE_NUM"]):
         workload_stat_filepath = f"schedule_results/workload_statistics/device{did}.txt"
         clear_old_file(workload_stat_filepath)
         memory_record_filepath = f"schedule_results/memory/device{did}.txt"

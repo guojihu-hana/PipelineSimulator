@@ -1,9 +1,9 @@
 import time
 import z3
 import copy
-from .painter import SchedulingPainter
-from .utils import resort_microbatch_index, print_to_file
-from .abstract.mutils import *
+from ..painter import SchedulingPainter
+from .chimera_utils import resort_microbatch_index, print_to_file
+from ..abstract.mutils import *
 
 class SPSimulator:
     """Simulator"""

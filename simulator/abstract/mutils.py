@@ -1,5 +1,3 @@
-from ..config import *
-
 class ExecuteStrategy:
     def __init__(self, overlap_aware, save_memory, constrain_warmup, swith_workload_type):
         self.overlap_aware = overlap_aware

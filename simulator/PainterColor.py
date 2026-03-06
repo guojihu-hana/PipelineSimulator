@@ -1,6 +1,9 @@
 from .abstract.context import global_context as gpc
-from .abstract.mutils import *
-def set_color(sid, workload_type, layer_num, layer_wise = LAYERWISE):
+from .abstract.variables import RunMode
+
+def set_color(sid, workload_type, layer_num, layer_wise = None):
+    if layer_wise is None:
+        layer_wise = gpc["LAYERWISE"]
     color = None
     if workload_type == 'f':    #颜色设置，加上w的情况
         color = "#FFF2CC"
@@ -44,7 +47,7 @@ def set_color(sid, workload_type, layer_num, layer_wise = LAYERWISE):
         elif workload_type == 'r':
             color = "#F8CECC"
 
-    if RUN_MODE == RunMode.LAYERWISE_GUROBI_SOLVE or layer_wise:
+    if gpc["RUN_MODE"] == RunMode.LAYERWISE_GUROBI_SOLVE or layer_wise:
         if sid == 0:
             color = "#F8CECC" # 红色: #F8CECC
         elif sid == layer_num - 2:

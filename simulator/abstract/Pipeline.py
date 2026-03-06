@@ -1,17 +1,11 @@
-from .Device import *
-from .Stage import Stage
+from .Device import Device
 from .Workload import Workload
-from .mutils import *
+from .mutils import TrainingConfig, dict_to_2d_list
+from .variables import WorkloadType, Schedule
+from .context import global_context as gpc
 from ..painter import SchedulingPainter as SP
-from ..LayerwisePainter import LayerwiseSchedulingPainter as LSP
 from ..utils import save_to_file
-from .Placement import PipelinePlacement
-from ..solver.predefined_model_partition_placement import get_octopipe_predefined_partition_placement, get_mist_predefined_partition_placement
-from ..solver.ordered_model_partition_placement import solve_ordered
-from ..solver.unordered_model_partition_placement import solve_unordered
-import itertools
 import json
-import os
 import copy
 workload_type_mapping = {
     'f':WorkloadType.F,
@@ -90,12 +84,12 @@ class PipelineScheduler:
         elif placement and partition:
             assert self.layer_num == sum(partition), f"Layer num should be equal to the sum of partition ({self.layer_num} != {sum(partition)})."
             assert len(placement) == self.device_num, f"Placement length should be equal to device num ({len(placement)} != {self.device_num})."
-            assert len(partition) == sum([len(p) for p in placement]), f"Partition length should be equal to the total number of stages in placement ({len(partition)} != {sum([len(p) for p in placement])})."
+            assert len(partition) == sum([len(p) for p in placement]), f"Partition length should be equal to the total number of stages in placement ({len(partition)} != {sum([len(p) for p in placement])}). partition: {partition}, placement: {placement}"
             self.stage_num = max([stage for p in placement for stage in p]) + 1
             self.partition = partition
             self.placement = placement
         else:
-            assert placement is None and partition is None, "Either both placement and partition should be provided, or neither of them should be provided."
+            assert placement is None and partition is None, f"Either both placement and partition should be provided, or neither of them should be provided. (placement: {placement}, partition: {partition})"
         print(f"-- Initialize {self.schedule_method.name} placement: {self.placement} and partition : {self.partition} successfully.")
 
     def save_partition(self):
@@ -397,6 +391,7 @@ class PipelineScheduler:
         return self.placement
     
     def print_partition_placement(self):
+        print(f"Pipeline idx: {self.pid}")
         for did, p in enumerate(self.placement):
             print(f"Device {did} has {len(p)} layers, {p}")
         if self.solver_results:

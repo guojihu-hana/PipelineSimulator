@@ -1,8 +1,8 @@
 import time
 from gurobipy import Model, GRB, quicksum
-from .painter import SchedulingPainter, MultiPipelinePainter as MPP
-from .abstract.mutils import *
-from .utils import print_to_file
+from ..painter import SchedulingPainter, MultiPipelinePainter as MPP
+from ..abstract.mutils import *
+from .chimera_utils import print_to_file
 import re
 
 workload_type_mapping = {

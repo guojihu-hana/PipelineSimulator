@@ -4,8 +4,8 @@ import copy
 import itertools
 from .GSimulator import GSimulator
 from .SPSimulator import SPSimulator
-from .utils import resort_microbatch_index, print_to_file
-from .abstract.mutils import F_TIME, W_TIME, B_TIME, LAYER_NUM
+from .chimera_utils import resort_microbatch_index, print_to_file
+from ..abstract.mutils import F_TIME, W_TIME, B_TIME, LAYER_NUM
 
 class DSASimulator:
     def __init__(self, config, solver_type="gurobi") -> None:

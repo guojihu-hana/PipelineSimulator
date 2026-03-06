@@ -1,16 +1,6 @@
 from enum import Enum
 from enum import IntEnum
 
-class RecomputeType(Enum):
-    FULL = 1
-    SELECTIVE = 2
-
-# class WorkloadType(Enum):
-#     F = "F"
-#     B = "B"
-#     W = "W"
-#     R = "R"
-
 class WorkloadType(IntEnum):
     F = 1
     B = 2
@@ -45,10 +35,6 @@ class Schedule(Enum):
     STANDARD_ZBH = 12
     STANDARD_ZBV = 13
     STANDARD_AFAB = 14
-
-class StageSearchOrder(Enum):
-    Random = "Random"
-    IncDec = "IncDec"
 
 class RunMode(Enum):
     SEARCH_SCHEDULE = "search_schedule"

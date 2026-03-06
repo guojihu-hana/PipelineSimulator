@@ -5,7 +5,7 @@ import os
 import tkinter as tk
 from tkinter import font
 from .utils import parse_microbatch_key, save_to_file
-from .abstract.mutils import *
+from .abstract.context import global_context as gpc
 from .PainterColor import set_color
 import tkinter as tk
 from PIL import Image, EpsImagePlugin
@@ -149,7 +149,7 @@ class SchedulingPainter:
         label_canvas.create_text(self._pp_align + 145, y_label, text="MinExeTime:{}, Chunk:{}, C:{}".format(
                 round(self._max_time),
                 self._stage_num // self._device_num,
-                COMM_TIME
+                gpc["COMM_TIME"]
             ),
         )
 
@@ -196,7 +196,7 @@ class SchedulingPainter:
             y1 = (self._pp_height + self._pp_align) * (did + 1) - pad + 5
 
             # save schedule representation in painter
-            if HEAD_DP:
+            if gpc["HEAD_DP"]:
                 schedule_res_content += "{}_{}_{}_{},{},{}\n".format(k,mid,sid,did,offset,offset+block_width)
             else:
                 schedule_res_content += "{}_{}_{},{},{}\n".format(k,mid,sid,offset,offset+block_width)
@@ -211,7 +211,7 @@ class SchedulingPainter:
                 underline= sid // self._device_num % 2,
                 weight= tk.font.NORMAL if sid // self._device_num % 2 else tk.font.BOLD
             )
-            if SHOW_WORKLOAD_TEXT:
+            if gpc["SHOW_WORKLOAD_TEXT"]:
                 text = main_canvas.create_text(
                     (x0 + x1) // 2, (y0 + y1) // 2, text=f"{mid}", font=bold_font
                 )
@@ -230,8 +230,8 @@ class SchedulingPainter:
             # 求余考虑virtual stage的情况
             self._item2mid[block] = mid
         
-        save_to_file(SCH_FILE_PATH, schedule_res_content, 'w')
-        save_to_file(TEMP_RES_PATH, schedule_res_content, 'w')
+        save_to_file(gpc["SCH_FILE_PATH"], schedule_res_content, 'w')
+        save_to_file(gpc["TEMP_RES_PATH"], schedule_res_content, 'w')
 
         # Register hook for highlighting execution block of this microbatch
         def _trigger_hook(event):
@@ -454,7 +454,7 @@ class MultiPipelinePainter:
                     underline= pid // self._device_size % 2,
                     weight= tk.font.NORMAL if pid // self._device_size % 2 else tk.font.BOLD
                 )
-                if SHOW_WORKLOAD_TEXT:
+                if gpc["SHOW_WORKLOAD_TEXT"]:
                     text = main_canvas.create_text(
                         (x0 + x1) // 2, (y0 + y1) // 2, text=f"{mid}", font=bold_font
                     )

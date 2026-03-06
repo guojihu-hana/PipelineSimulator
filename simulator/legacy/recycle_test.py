@@ -1,4 +1,4 @@
-from simulator.ReCycleSimulator import ReCyclePipeline
+from simulator.legacy.ReCycleSimulator import ReCyclePipeline
 
 if __name__ == "__main__":
     pipeline_num = 2

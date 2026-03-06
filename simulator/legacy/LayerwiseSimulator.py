@@ -1,11 +1,11 @@
 import time
 import json
 from gurobipy import Model, GRB, quicksum
-from .LayerwisePainter import LayerwiseSchedulingPainter
-from .abstract.mutils import *
-from .utils import resort_microbatch_index, print_to_file
-from .abstract import Pipeline
-from .abstract.Device import get_required_memory
+from simulator.legacy.LayerwisePainter import LayerwiseSchedulingPainter
+from simulator.abstract.mutils import *
+from simulator.legacy.chimera_utils import resort_microbatch_index, print_to_file
+from simulator.abstract import Pipeline
+from simulator.abstract.Device import get_required_memory
 
 workload_type_mapping = {
     'f':WorkloadType.F,

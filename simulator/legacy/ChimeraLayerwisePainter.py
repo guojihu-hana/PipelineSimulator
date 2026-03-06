@@ -4,8 +4,8 @@ painter package
 import tkinter as tk
 from tkinter import font
 from .chimera_utils import parse_microbatch_key, print_to_file
-from .abstract.mutils import *
-from .PainterColor import set_color
+from ..abstract.mutils import *
+from ..PainterColor import set_color
 
 class LayerwiseSchedulingPainter:
     """Scheduling Painter"""

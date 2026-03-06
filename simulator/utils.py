@@ -4,8 +4,6 @@ utils package
 from typing import Literal
 import os
 from typing import Dict, Tuple
-from z3 import If
-from .z3_config import *
 from .config import SAVE_RES_TO_FILE
 # def parse_microbatch_key(key: str) -> Tuple[bool, int, int]:
 #     "parse microbatch key"
