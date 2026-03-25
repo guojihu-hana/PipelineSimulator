@@ -59,10 +59,9 @@ class OrderedQueue:
     def _key(self, workload):
         type_rank = self.type_priority.get(workload.wtype, 999)
         if workload.wtype == WorkloadType.B:
-            return (type_rank, workload.mid, - workload.sid, self._counter)
+            return (type_rank, - workload.sid, workload.mid, self._counter)
         else:
             return (type_rank, workload.mid, workload.sid, self._counter)
-        return (type_rank, workload.mid, workload.sid, self._counter)
 
     def push(self, workload):
         key = self._key(workload)

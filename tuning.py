@@ -126,6 +126,305 @@ def balanced_transpose(placement, layer_comp_time):
     new_place.sort(key=lambda row: row[0] if row else 1e9)
     return new_place
 
+def solve_placement_min_pp_comp_time(
+    model_partition,
+    model_placement,
+    layer_comp_time,
+    *,
+    beam_width: int = 512,
+    top_n: int = 1,
+    normalize_equal_cost_blocks: bool = True,
+):
+    """
+    Diverse candidate placement generator.
+
+    Generates a large, diverse set of candidate placements using multiple
+    strategies so that the caller can evaluate each via full simulation and
+    pick the best actual makespan.
+
+    Strategies:
+      A) Interleaved (stride-D) — known to work well for pipeline scheduling.
+      B) Interleaved + random perturbations (1–5 random swaps).
+      C) Random placements that satisfy the adjacency constraint.
+      D) Constructive beam search (assign stages one-by-one to least-loaded device).
+
+    Adjacency constraint: stage k and stage k±1 must be on different devices.
+
+    Returns:
+      If top_n == 1: (placement, pp_comp_times, stage_comp_times)
+      If top_n > 1:  (placements_list, pp_comp_times_list, stage_comp_times)
+    """
+    import random as _rng
+
+    num_pp = len(model_placement)
+    num_stages = len(model_partition)
+    if num_stages > 1 and num_pp < 2:
+        raise ValueError("Need at least 2 devices when stage_num > 1.")
+
+    prefix = [0]
+    for p in model_partition:
+        prefix.append(prefix[-1] + int(p))
+    assert prefix[-1] == len(layer_comp_time), (
+        f"Sum(partition) ({prefix[-1]}) must equal len(layer_comp_time) ({len(layer_comp_time)})"
+    )
+
+    stage_comp_times = []
+    for k in range(num_stages):
+        stage_comp_times.append(sum(layer_comp_time[prefix[k]:prefix[k + 1]]))
+    stage_comp_times = [round(t, 2) for t in stage_comp_times]
+
+    def _adj_ok(assigned):
+        for k in range(1, num_stages):
+            if assigned[k] == assigned[k - 1]:
+                return False
+        return True
+
+    def _load(assigned):
+        load = [0.0] * num_pp
+        for sid, did in enumerate(assigned):
+            load[did] += stage_comp_times[sid]
+        return load
+
+    def _variance(vals):
+        m = sum(vals) / len(vals)
+        return sum((v - m) ** 2 for v in vals) / len(vals)
+
+    def _place_from_assigned(assigned):
+        p = [[] for _ in range(num_pp)]
+        for sid, did in enumerate(assigned):
+            p[did].append(sid)
+        for row in p:
+            row.sort()
+        return p
+
+    # --- Candidate collection ---
+    seen_sigs = set()
+    all_candidates = []  # list of (assigned, load)
+
+    def _add(assigned):
+        sig = tuple(assigned)
+        if sig in seen_sigs:
+            return
+        seen_sigs.add(sig)
+        all_candidates.append((list(assigned), _load(assigned)))
+
+    # Strategy A: Interleaved (stride-D)
+    interleaved = [s % num_pp for s in range(num_stages)]
+    if _adj_ok(interleaved):
+        _add(interleaved)
+
+    # Strategy B: Interleaved + random perturbations
+    n_perturb = min(beam_width // 2, 300)
+    for _ in range(n_perturb):
+        a = interleaved[:]
+        n_swaps = _rng.randint(1, min(5, num_stages // 2))
+        for __ in range(n_swaps):
+            s1, s2 = _rng.sample(range(num_stages), 2)
+            a[s1], a[s2] = a[s2], a[s1]
+        if _adj_ok(a):
+            _add(a)
+
+    # Strategy C: Random adjacency-satisfying placements
+    n_random = min(beam_width // 2, 300)
+    for _ in range(n_random):
+        a = [-1] * num_stages
+        ok = True
+        for s in range(num_stages):
+            devs = list(range(num_pp))
+            _rng.shuffle(devs)
+            placed = False
+            for d in devs:
+                if s > 0 and a[s - 1] == d:
+                    continue
+                a[s] = d
+                placed = True
+                break
+            if not placed:
+                ok = False
+                break
+        if ok and _adj_ok(a):
+            _add(a)
+
+    # Strategy D: Constructive beam search (assign in stage order to least-loaded device)
+    cbeam = [([0.0] * num_pp, [-1] * num_stages)]
+    for sid in range(num_stages):
+        cost = stage_comp_times[sid]
+        next_beam = []
+        for load, assigned in cbeam:
+            for d in range(num_pp):
+                if sid > 0 and assigned[sid - 1] == d:
+                    continue
+                new_load = load[:]
+                new_load[d] += cost
+                new_assigned = assigned[:]
+                new_assigned[sid] = d
+                score = (_variance(new_load), max(new_load), new_load[d], d)
+                next_beam.append((score, new_load, new_assigned))
+        next_beam.sort(key=lambda x: x[0])
+        cbeam = [(l, a) for _, l, a in next_beam[:min(32, beam_width // 4)]]
+    for _, assigned in cbeam:
+        if _adj_ok(assigned):
+            _add(assigned)
+
+    # Strategy E: Interleaved variants with different stride patterns
+    for stride in range(1, num_pp + 1):
+        a = [-1] * num_stages
+        for s in range(num_stages):
+            a[s] = (s * stride) % num_pp
+        if _adj_ok(a):
+            _add(a)
+    # Reversed interleaved
+    a_rev = [interleaved[num_stages - 1 - s] for s in range(num_stages)]
+    if _adj_ok(a_rev):
+        _add(a_rev)
+
+    if not all_candidates:
+        raise RuntimeError("No feasible placement found.")
+
+    # --- Deduplicate by load signature and return top-N ---
+    all_candidates.sort(key=lambda s: (_variance(s[1]), max(s[1])))
+
+    top_results = []
+    seen_load_sigs = set()
+    for assigned, load in all_candidates:
+        place = _place_from_assigned(assigned)
+        if normalize_equal_cost_blocks:
+            place = normalize_equal_cost_blocks_round_robin(place, stage_comp_times)
+        top_results.append((place, list(load)))
+        if len(top_results) >= top_n:
+            break
+
+    if top_n == 1:
+        return top_results[0][0], top_results[0][1], stage_comp_times
+
+    top_placements = [r[0] for r in top_results]
+    top_pp_comp_times = [r[1] for r in top_results]
+    return top_placements, top_pp_comp_times, stage_comp_times
+
+
+def enforce_monotone_device_ids_by_stage_id(
+    placement,
+    stage_comp_times,
+    pp_comp_times,
+    *,
+    tol: float = 1e-6,
+):
+    """
+    Step-2 postprocess:
+    Re-arrange stage assignment so that as stage id increases, its device id is non-decreasing,
+    i.e. stages form contiguous blocks for device 0,1,...,D-1 in stage-id order.
+
+    Constraint: per-device total comp time must remain unchanged (pp_comp_times).
+
+    This is done by scanning stages in increasing stage id and cutting D contiguous blocks whose
+    sums match the target per-device loads exactly (within tol).
+
+    Returns:
+      new_placement (List[List[int]])
+    Raises:
+      ValueError if exact matching is impossible under the monotone constraint.
+    """
+    num_pp = len(placement)
+    num_stages = len(stage_comp_times)
+    if len(pp_comp_times) != num_pp:
+        raise ValueError("pp_comp_times length must equal number of devices")
+
+    targets = [float(x) for x in pp_comp_times]
+    stages = list(range(num_stages))
+
+    new_placement = [[] for _ in range(num_pp)]
+    idx = 0
+    for did in range(num_pp):
+        tgt = targets[did]
+        s = 0.0
+        # assign at least one stage if remaining stages == remaining devices
+        while idx < num_stages and (s + stage_comp_times[idx] <= tgt + tol or (num_stages - idx) == (num_pp - did)):
+            new_placement[did].append(idx)
+            s += float(stage_comp_times[idx])
+            idx += 1
+            if abs(s - tgt) <= tol:
+                break
+        if abs(s - tgt) > tol:
+            raise ValueError(
+                f"Cannot match target load for device {did}: got {s}, target {tgt}. "
+                f"Monotone-by-stage-id constraint makes it infeasible."
+            )
+
+    if idx != num_stages:
+        raise ValueError("Not all stages were assigned under monotone constraint.")
+
+    return new_placement
+
+
+def normalize_equal_cost_blocks_round_robin(
+    placement,
+    stage_comp_times,
+    *,
+    tol: float = 1e-6,
+):
+    """
+    Postprocess placement for the case you described:
+
+    For any *consecutive* stage-id block where stage_comp_times are equal (within tol),
+    enforce round-robin device assignment by stage id order:
+      stage base+0 -> device 0
+      stage base+1 -> device 1
+      ...
+      stage base+D-1 -> device D-1
+    for each full chunk of size D inside that equal-cost block.
+
+    This preserves per-device total comp time for those stages as long as within each
+    full chunk we still assign exactly one stage to each device (true by construction),
+    and the stages in the chunk have equal cost.
+
+    Notes:
+    - Only applies to full chunks of size D. Remainder (<D) stages at the end of a block
+      are left as-is.
+    - This DOES allow device ids to "wrap" (e.g., stage 3 on device 3, stage 4 on device 0),
+      which matches your expected 0,1,2,3 pattern.
+    """
+    num_pp = len(placement)
+    num_stages = len(stage_comp_times)
+
+    # Build current stage->device mapping.
+    stage_to_dev = [-1] * num_stages
+    for did, sids in enumerate(placement):
+        for sid in sids:
+            stage_to_dev[sid] = did
+    if any(d == -1 for d in stage_to_dev):
+        raise ValueError("Placement does not cover all stages (stage_to_dev has -1).")
+
+    # Find consecutive equal-cost blocks by stage id.
+    blocks = []
+    i = 0
+    while i < num_stages:
+        j = i + 1
+        while j < num_stages and abs(float(stage_comp_times[j]) - float(stage_comp_times[i])) <= tol:
+            j += 1
+        blocks.append((i, j))  # [i, j)
+        i = j
+
+    # Reassign within each block, chunked by device count.
+    for start, end in blocks:
+        length = end - start
+        full = (length // num_pp) * num_pp
+        for base in range(start, start + full, num_pp):
+            for offset in range(num_pp):
+                sid = base + offset
+                target_dev = offset
+                cur_dev = stage_to_dev[sid]
+                if cur_dev == target_dev:
+                    continue
+                # Move sid from cur_dev to target_dev (swap by moving).
+                placement[cur_dev].remove(sid)
+                placement[target_dev].append(sid)
+                stage_to_dev[sid] = target_dev
+
+    # Normalize: sort stage ids within each device.
+    for row in placement:
+        row.sort()
+    return placement
+
 def serialize(p):
     return tuple(tuple(row) for row in p)
 
@@ -333,3 +632,12 @@ def tune_partition(partition, placement, layer_comp_time, device_execution_times
                 return new_partition
 
     return partition
+
+if __name__ == "__main__":
+    placement = [[0, 1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12, 13], [14, 15, 16, 17, 18, 19, 20], [21, 22, 23, 24, 25, 26, 27]]
+    partition = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    layer_comp_time = [12.971404966230345, 10.245337226926678, 27.587792641586727, 26.872286634312736, 27.45064462194539, 26.55433409442805, 26.50246579930036, 26.858190957946007, 26.875891235139633, 26.745782079720737, 26.764864541063403, 26.65297163345597, 27.35851009626581, 27.06289459177942, 26.178063635573245, 26.423338039354846, 26.7423149856052, 26.58582664288656, 26.144167055686317, 26.51176076224356, 26.575061039792168, 26.638643577243343, 26.065844745346993, 26.282502118084167, 27.730233389620828, 28.49078457584285, 27.202737509602247, 38.96261173787743]
+    new_placement, pp_comp_times, stage_comp_times = solve_placement_min_pp_comp_time(partition, placement, layer_comp_time)
+    print(new_placement)
+    print(pp_comp_times)
+    print(stage_comp_times)

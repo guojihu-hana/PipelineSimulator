@@ -21,7 +21,6 @@ LAYER_NUM = 4 * 4 * 1
 MICRO_BATCH_SIZE = 1
 MICRO_BATCH_NUM = 4 * 4 * 1
 
-WORLD_SIZE = DEVICE_NUM
 PP_SIZE = DEVICE_NUM
 TP_SIZE = 1
 MODEL_TYPE = "GPT"
@@ -161,40 +160,6 @@ SWITCH_WORKLOAD_TYPE = True
 MEMORY_CONSTRAIN = 0.1
 MEMORY_REDUCATION = 0.0
 
-F_TIME = 10
-F_TIMES = [F_TIME] * LAYER_NUM
-B_TIMES = [F_TIME] * LAYER_NUM
-W_TIMES = [F_TIME] * LAYER_NUM
-F_TIMES[-1] += F_TIME // 2
-B_TIMES[-1] += 6
-
-from data.profiled_data import stage_time
-MODEL_NAME = "gpt-oss-20B"
-LAYER_NUM=24
-F_TIMES = stage_time[MODEL_NAME][2048]["f"]
-B_TIMES = stage_time[MODEL_NAME][2048]["b"]
-MODEL_NAME = "nemotron-nano-v2-9B"
-LAYER_NUM=56
-F_TIMES = stage_time[MODEL_NAME][4096]["f"]
-B_TIMES = stage_time[MODEL_NAME][4096]["b"]
-# MODEL_NAME = "deepseek-16B"
-# LAYER_NUM=28
-# F_TIMES = stage_time[MODEL_NAME][4096]["f"]
-# B_TIMES = stage_time[MODEL_NAME][4096]["b"]
-# MODEL_NAME = "gpt-13B"
-# LAYER_NUM=40
-# F_TIMES = stage_time[MODEL_NAME][4096]["f"]
-# B_TIMES = stage_time[MODEL_NAME][4096]["b"]
-EMB_F_TIME = 0
-EMB_B_TIME = 0
-EMB_W_TIME = 0
-HEAD_F_TIME = 0
-HEAD_B_TIME = 0
-HEAD_W_TIME = 0
-CE_F_TIME = 0
-CE_B_TIME = 0
-CE_W_TIME = 0
-
 SCHEDULE_UNIT = MICRO_BATCH_NUM // 1
 REVERSE_LAST_STAGES = False
 REVERSE_FIRST_STAGES = False
@@ -268,20 +233,16 @@ class Gradient:
 
 
 # --------------------- Painter Config ---------------------
-PIXEL_BASE = 1.5
+PIXEL_BASE = 2
 PP_HEIGHT = 25
 PP_ALIGN = 5
-SHOW_WORKLOAD_TEXT = False
+SHOW_WORKLOAD_TEXT = True
 if CHUNK_NUM > PP_SIZE:
     SHOW_WORKLOAD_TEXT = False
 # --------------------- Painter Config ---------------------
 
 # --------------------- Save File Config ---------------------
 SAVE_RES_TO_FILE = True
-SCH_FILE_PATH = f"schedule_results/schedules/heter{HETER_DEVICE}/vs{VOCAB_SIZE}_l{LAYER_NUM}_s{SEQ_LEN}_h{HIDDEN_SIZE}/mb{MICRO_BATCH_NUM}_pp{PP_SIZE}_tp{TP_SIZE}_zr{ZERO_SIZE}_c{CHUNK_NUM}/{SCHEDULE_METHOD.name}_{STAGE_PLACEMENT.name}_w{SPLIT_BACKPROP}_l{LAYERWISE}_o{OVERLAP_DEGREE}.txt"
-PLA_FILE_PATH = f"schedule_results/placements/heter{HETER_DEVICE}/vs{VOCAB_SIZE}_l{LAYER_NUM}_s{SEQ_LEN}_h{HIDDEN_SIZE}/mb{MICRO_BATCH_NUM}_pp{PP_SIZE}_tp{TP_SIZE}_zr{ZERO_SIZE}_c{CHUNK_NUM}/{SCHEDULE_METHOD.name}_{STAGE_PLACEMENT.name}_w{SPLIT_BACKPROP}_l{LAYERWISE}_o{OVERLAP_DEGREE}.txt"
-TEMP_PLA_PATH = f"schedule_results/placement.txt"
-TEMP_RES_PATH = f"schedule_results/result.txt"
 
 STAGE_NUM = int(DEVICE_NUM * CHUNK_NUM)
 assert STAGE_NUM <= LAYER_NUM, f"Stage ({STAGE_NUM}) should be less than Layer ({LAYER_NUM}). "

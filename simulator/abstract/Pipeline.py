@@ -7,6 +7,7 @@ from ..painter import SchedulingPainter as SP
 from ..utils import save_to_file
 import json
 import copy
+import os
 workload_type_mapping = {
     'f':WorkloadType.F,
     'b':WorkloadType.B,
@@ -67,7 +68,7 @@ class PipelineScheduler:
             for workload in workloads:
                 device.executable_workloads.push(workload)
 
-    def _init_placement_and_partition(self, schedule_method, placement, partition):
+    def _init_placement_and_partition(self, schedule_method, placement, partition, verbose=False):
         if schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_INTERLEAVED, Schedule.STANDARD_AFAB, Schedule.ReCycle):
             self.stage_num = self.device_num * self.chunk_num
             assert self.layer_num % self.stage_num == 0, f"Layer num {self.layer_num} should be divisible by stage num {self.stage_num} for standard schedules."
@@ -90,10 +91,14 @@ class PipelineScheduler:
             self.placement = placement
         else:
             assert placement is None and partition is None, f"Either both placement and partition should be provided, or neither of them should be provided. (placement: {placement}, partition: {partition})"
-        print(f"-- Initialize {self.schedule_method.name} placement: {self.placement} and partition : {self.partition} successfully.")
+        
+        if verbose:
+            print(f"-- Initialize {self.schedule_method.name} placement: {self.placement} and partition : {self.partition} successfully.")
 
     def save_partition(self):
-        with open("schedule_results/partition.txt", 'w') as f:
+        path = gpc.get("PARTITION_TXT_PATH", "schedule_results/partition.txt")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
             f.write(str(self.partition))
             f.flush()
 
@@ -152,7 +157,7 @@ class PipelineScheduler:
             self.recomp_set[idx] = 1 if r else 0
             self.results[f"theta_{idx}"] = r
 
-    def _init_device(self):
+    def _init_device(self, verbose=False):
         for did in range(self.device_num):
             device = Device(
                 device_idx = did,
@@ -167,19 +172,25 @@ class PipelineScheduler:
             self.devices.append(device)
         self.set_recomputation_config()
         assert self.placement and self.partition, "Placement and partition should be provided for initializing devices."
-        layer_idx_start = 0
+        prefix = [0]
+        for p in self.partition:
+            prefix.append(prefix[-1] + p)
         for did in range(self.device_num):
             for sid in self.placement[did]:
                 layer_num = self.partition[sid]
-                self.devices[did].add_stage(stage_id=sid, layer_num=layer_num, layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
-                layer_idx_start += layer_num
+                self.devices[did].add_stage(
+                    stage_id=sid,
+                    layer_num=layer_num,
+                    layer_idx_start=prefix[sid],
+                    recomp=self.recomp_set[did],
+                )
         if self.vocab_parallel:
             for did in range(self.device_num):
-                self.devices[did].add_stage(self.stage_num, layer_num=1, layer_idx_start=layer_idx_start, recomp=self.recomp_set[did])
+                self.devices[did].add_stage(self.stage_num, layer_num=1, layer_idx_start=prefix[-1], recomp=self.recomp_set[did])
         
-        print(f"Initialize devices and stages successfully with placement {self.placement} and partition {self.partition}.")
-        for device in self.devices:
-            print(f"Device {device.did} has stages {list(device.stages.keys())} with layer nums {[device.stages[sid].layer_num for sid in device.stages.keys()]}.")
+        if verbose:
+            for device in self.devices:
+                print(f"Device {device.did} has stages {list(device.stages.keys())} with layer nums {[device.stages[sid].layer_num for sid in device.stages.keys()]}, total layer num: {sum([device.stages[sid].layer_num for sid in device.stages.keys()])}.")
 
         if self.head_dp:
             for device in self.devices:
@@ -195,8 +206,7 @@ class PipelineScheduler:
 
         # print(self.placement)
 
-        save_to_file(gpc["TEMP_PLA_PATH"], str(self.placement), 'w')
-        save_to_file(gpc["PLA_FILE_PATH"], str(self.placement), 'w')
+        save_to_file(gpc["PLACEMENT_PATH"], str(self.placement), 'w')
 
     def set_recomputation_config(self):
         self.recomp_set = [1 if gpc["RECOMP"] else 0 for _ in range(self.stage_num)]

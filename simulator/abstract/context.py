@@ -1,11 +1,15 @@
 import inspect
+import os
 import random
+import re
 import socket
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
-from typing import Union
-import sys
+from typing import Optional, Union
+
+DEFAULT_F_TIME = 10
+
 sys.path.append(".")
 class Config(dict):
     """This is a wrapper class for dict objects so that values of which can be
@@ -97,7 +101,199 @@ class Config(dict):
 
         return config
 
+
+def sanitize_run_subdir_component(name: str) -> str:
+    """Make a single path segment safe for common filesystems (macOS/Linux/Windows)."""
+    s = str(name).replace("/", "_").replace("\\", "_")
+    s = re.sub(r"[^\w\-.]+", "_", s, flags=re.UNICODE)
+    s = s.strip("._")
+    return s or "unknown"
+
+
+def refresh_run_output_paths(
+    gpc: Optional[Union[Config, dict]] = None,
+    *,
+    micro_batch_num: Optional[int] = None,
+) -> None:
+    """
+    Set ``RUN_OUTPUT_DIR`` and per-run artifact paths under:
+
+        schedule_results/{schedule_name}_{model_name}_PP{pp}_mb{mb}/
+
+    ``result.txt``, ``placement.txt``, and ``partition.txt`` are written there.
+
+    Call **once per run** after ``SCHEDULE_METHOD``, ``PP_SIZE``/``DEVICE_NUM``,
+    ``MODEL_NAME``, and micro-batch count are all finalized (e.g. after building
+    ``TrainingConfig`` in ``__main__.py``). Calling this repeatedly with different
+    parameters would otherwise create multiple output directories.
+    """
+    gpc = global_context if gpc is None else gpc
+    sched = gpc["SCHEDULE_METHOD"].name
+    model = gpc.get("MODEL_NAME", "default")
+    pp = int(gpc["PP_SIZE"])
+    mb = int(micro_batch_num) if micro_batch_num is not None else int(gpc["MICRO_BATCH_NUM"])
+    sub = (
+        f"{sanitize_run_subdir_component(sched)}_{sanitize_run_subdir_component(model)}"
+        f"_PP{pp}_mb{mb}"
+    )
+    out_dir = os.path.join("schedule_results", sub)
+    # Do not mkdir here: intermediate refreshes would create multiple sibling folders per run.
+    # Directories are created when files are written (see save_to_file / save_partition).
+    gpc["RUN_OUTPUT_DIR"] = out_dir
+    gpc["SCHEDULING_PATH"] = os.path.join(out_dir, "result.txt")
+    gpc["PLACEMENT_PATH"] = os.path.join(out_dir, "placement.txt")
+    gpc["PARTITION_TXT_PATH"] = os.path.join(out_dir, "partition.txt")
+
+
 global_context = Config.from_file("simulator/config.py")
+# Per-run paths are set once by the entrypoint via refresh_run_output_paths() after
+# schedule / device / model / micro-batch are finalized (see __main__.py).
+
+def apply_stage_time_profile(model_name: str, seq_len: Union[int, None] = None) -> Config:
+    """
+    Apply profiled per-stage forward/backward times from `data.profiled_data.stage_time`
+    into `global_context`, and infer `LAYER_NUM` automatically.
+
+    Convention: stage_time[model][seq]["f"/"b"] contains per-layer/stage times with
+    length equal to the model layer count. Therefore LAYER_NUM is inferred as len(times).
+    """
+    global global_context
+    gpc = global_context
+
+    from data.profiled_data import stage_time  # local import to avoid hard dependency at module import time
+    supported_models = sorted(stage_time.keys())
+
+    # Unknown model: fall back to default F/B/W times from `simulator/config.py` (164-178)
+    if model_name not in stage_time:
+        print(
+            f"[WARN] Unknown model_name={model_name!r}. "
+            f"Falling back to default timing config. "
+            f"Supported profiled models: {supported_models}"
+        )
+        # Keep existing LAYER_NUM from config, only reset times like in config.py 164-178
+        layer_num = gpc["LAYER_NUM"]
+        f_time = DEFAULT_F_TIME
+
+        gpc["MODEL_NAME"] = model_name
+        gpc["F_TIME"] = f_time
+        gpc["F_TIMES"] = [f_time] * layer_num
+        gpc["B_TIMES"] = [f_time] * layer_num
+        gpc["W_TIMES"] = [f_time] * layer_num
+        if layer_num >= 1:
+            gpc["F_TIMES"][-1] += f_time // 2
+            gpc["B_TIMES"][-1] += 6
+
+        # Reset non-transformer layer times as in config.py 170-178
+        gpc["EMB_F_TIME"] = 0
+        gpc["EMB_B_TIME"] = 0
+        gpc["EMB_W_TIME"] = 0
+        gpc["HEAD_F_TIME"] = 0
+        gpc["HEAD_B_TIME"] = 0
+        gpc["HEAD_W_TIME"] = 0
+        gpc["CE_F_TIME"] = 0
+        gpc["CE_B_TIME"] = 0
+        gpc["CE_W_TIME"] = 0
+
+        return gpc
+
+    model_profiles = stage_time[model_name]
+    if not model_profiles:
+        raise KeyError(f"No stage_time profiles found for model_name={model_name!r}")
+
+    if seq_len is None:
+        preferred = gpc.get("SEQ_LEN", None)
+        if preferred in model_profiles:
+            seq_len = preferred
+        else:
+            seq_len = max(model_profiles.keys())
+
+    if seq_len not in model_profiles:
+        raise KeyError(
+            f"Unknown seq_len={seq_len!r} for model_name={model_name!r}. "
+            f"Available: {sorted(model_profiles.keys())}"
+        )
+
+    f_times = list(model_profiles[seq_len]["f"])
+    b_times = list(model_profiles[seq_len]["b"])
+    layer_num = len(f_times)
+
+    arch = model_profiles[seq_len].get("arch", None)
+    if len(f_times) != len(b_times):
+        raise ValueError(
+            f"stage_time length mismatch for {model_name!r} seq_len={seq_len}: "
+            f"len(f)={len(f_times)} != len(b)={len(b_times)}"
+        )
+    if len(f_times) < 1:
+        raise ValueError(f"stage_time too short for {model_name!r} seq_len={seq_len}: {len(f_times)}")
+
+    if arch is not None and len(arch) != layer_num:
+        raise ValueError(
+            f"stage_time length mismatch for {model_name!r} seq_len={seq_len}: "
+            f"len(arch)={len(arch)} != len(f)={layer_num}"
+        )
+
+    gpc["MODEL_NAME"] = model_name
+    gpc["SEQ_LEN"] = seq_len
+    gpc["LAYER_NUM"] = layer_num
+    gpc["ARCH"] = list(arch) if arch is not None else None
+    gpc["F_TIMES"] = f_times
+    gpc["B_TIMES"] = b_times
+    # Keep shapes consistent; actual W_TIMES may be overwritten later (e.g. when bwd_split=True).
+    gpc["W_TIMES"] = [0 for _ in range(layer_num)]
+
+    return gpc
+
+
+def apply_device_config(device_num: int) -> Config:
+    """
+    Update DEVICE_NUM and related derived fields in `global_context`.
+    This mirrors the logic in `simulator/config.py` so that the number of
+    pipeline stages/devices can be controlled from the entrypoint.
+    """
+    global global_context
+    gpc = global_context
+
+    gpc["DEVICE_NUM"] = device_num
+    gpc["PP_SIZE"] = device_num
+
+    # Recompute CHUNK_NUM based on SCHEDULE_METHOD (similar policy as config.py).
+    schedule_method = gpc["SCHEDULE_METHOD"]
+    chunk_num = gpc.get("CHUNK_NUM", 1)
+    from simulator.abstract.variables import Schedule  # local import to avoid cycles at module import
+    if schedule_method == Schedule.STANDARD_INTERLEAVED:
+        chunk_num = gpc["LAYER_NUM"] // device_num
+    elif schedule_method in (Schedule.STANDARD_ZBH, Schedule.STANDARD_1F1B, Schedule.STANDARD_AFAB):
+        chunk_num = 1
+    gpc["CHUNK_NUM"] = chunk_num
+
+    # Recompute stage-related stats.
+    stage_num = int(device_num * chunk_num)
+    gpc["STAGE_NUM"] = stage_num
+    gpc["MAX_ACTIVATION_COUNTS"] = int(stage_num * 2)
+
+    # Recompute schedule/save-file paths so they stay consistent with new DEVICE_NUM.
+    try:
+        heter = gpc["HETER_DEVICE"]
+        vocab = gpc["VOCAB_SIZE"]
+        lnum = gpc["LAYER_NUM"]
+        slen = gpc["SEQ_LEN"]
+        hsize = gpc["HIDDEN_SIZE"]
+        mbnum = gpc["MICRO_BATCH_NUM"]
+        pp = gpc["PP_SIZE"]
+        tp = gpc["TP_SIZE"]
+        zr = gpc["ZERO_SIZE"]
+        ch = gpc["CHUNK_NUM"]
+        sm = gpc["SCHEDULE_METHOD"]
+        sp = gpc["STAGE_PLACEMENT"]
+        w = gpc["SPLIT_BACKPROP"]
+        lw = gpc["LAYERWISE"]
+        od = gpc["OVERLAP_DEGREE"]
+
+    except Exception:
+        # Best-effort; if anything is missing we just skip path recomputation.
+        pass
+
+    return gpc
 
 def flush_fbw_time(bwd_split, ideal_case):
     global global_context

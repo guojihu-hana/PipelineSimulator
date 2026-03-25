@@ -198,8 +198,7 @@ class LayerwiseSchedulingPainter:
             # 求余考虑virtual stage的情况
             self._item2mid[block] = mid
 
-        save_to_file(gpc["SCH_FILE_PATH"], schedule_res_content, 'w')
-        save_to_file(gpc["TEMP_RES_PATH"], schedule_res_content, 'w')
+        save_to_file(gpc["SCHEDULING_PATH"], schedule_res_content, 'w')
         
         # Register hook for highlighting execution block of this microbatch
         def _trigger_hook(event):

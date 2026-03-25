@@ -230,8 +230,7 @@ class SchedulingPainter:
             # 求余考虑virtual stage的情况
             self._item2mid[block] = mid
         
-        save_to_file(gpc["SCH_FILE_PATH"], schedule_res_content, 'w')
-        save_to_file(gpc["TEMP_RES_PATH"], schedule_res_content, 'w')
+        save_to_file(gpc["SCHEDULING_PATH"], schedule_res_content, 'w')
 
         # Register hook for highlighting execution block of this microbatch
         def _trigger_hook(event):
@@ -467,8 +466,11 @@ class MultiPipelinePainter:
                 # 求余考虑virtual stage的情况
                 self._item2mid[block] = mid
 
-            save_to_file(f"schedule_results/result.txt", schedule_res_content, 'w')
-            save_to_file(f"schedule_results/MultiPipeline/DP{dp_idx}/result.txt", schedule_res_content, 'w')
+            run_dir = gpc["RUN_OUTPUT_DIR"]
+            save_to_file(os.path.join(run_dir, "result.txt"), schedule_res_content, "w")
+            dp_dir = os.path.join(run_dir, "MultiPipeline", f"DP{dp_idx}")
+            os.makedirs(dp_dir, exist_ok=True)
+            save_to_file(os.path.join(dp_dir, "result.txt"), schedule_res_content, "w")
 
         # Register hook for highlighting execution block of this microbatch
         def _trigger_hook(event):
