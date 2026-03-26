@@ -2,6 +2,7 @@ from simulator.abstract.Pipeline import PipelineScheduler
 from simulator.abstract.mutils import TrainingConfig, dict_to_2d_list
 from simulator.abstract.Device import Device
 from simulator.abstract.variables import Schedule, WorkloadType
+from simulator.abstract.Workload import Workload
 from simulator.abstract.context import global_context as gpc
 from simulator.painter import MultiPipelinePainter as MPP
 from tuning import (
@@ -21,8 +22,19 @@ import heapq
 
 class Executor:
 
-    def __init__(self, schedule_method, tc: TrainingConfig, model_name: str = None, nmb_per_dp: list = None, device_comp_power: list[list] = None, device_mem: list[list] = None) -> None:
+    def __init__(
+        self,
+        schedule_method,
+        tc: TrainingConfig,
+        model_name: str = None,
+        nmb_per_dp: list = None,
+        device_comp_power: list[list] = None,
+        device_mem: list[list] = None,
+        *,
+        discrete_event_time: bool = True,
+    ) -> None:
         self.time           = 0
+        self.discrete_event_time = discrete_event_time
         self.schedule_method = schedule_method
         self.model_name     = model_name,
         self.tc             = tc
@@ -58,6 +70,55 @@ class Executor:
 
     def update_time(self):
         self.time += 1
+
+    def _normalize_future_tick(self, t0: int, value) -> int | None:
+        """Integer tick strictly after t0 for a completion/ready timestamp."""
+        if value is None:
+            return None
+        x = int(math.ceil(float(value)))
+        return x if x > t0 else None
+
+    def _pipeline_future_event_ticks(self, pipeline, t0: int) -> list[int]:
+        """Per-pipeline future event times: BUSY end_time, unconstrained future ready_time."""
+        ticks: set[int] = set()
+        for device in pipeline.devices:
+            if device.state == Device.BUSY and device.current_workload is not None:
+                nt = self._normalize_future_tick(t0, device.current_workload.end_time)
+                if nt is not None:
+                    ticks.add(nt)
+            for stage in device.stages.values():
+                for wmap in stage.workloads.values():
+                    for w in wmap.values():
+                        if w.state != Workload.not_started or w.constraints:
+                            continue
+                        if w.ready_time > t0:
+                            ticks.add(int(w.ready_time))
+        return sorted(ticks)
+
+    def _next_simulation_tick(self, time_limit: int) -> int:
+        """Earliest tick > current time among all pipelines' event points; else t+1; capped at time_limit+1."""
+        t0 = self.time
+        merged: set[int] = set()
+        for p in self.pipelines:
+            merged.update(self._pipeline_future_event_ticks(p, t0))
+        if not merged:
+            return min(t0 + 1, time_limit + 1)
+        return min(min(merged), time_limit + 1)
+
+    def _advance_simulation_time(self, time_limit: int) -> None:
+        """Jump to next event time; batch idle ticks for devices that stay IDLE over the gap."""
+        if not self.discrete_event_time:
+            self.update_time()
+            return
+        t0 = self.time
+        next_t = self._next_simulation_tick(time_limit)
+        if next_t > t0 + 1:
+            dt = next_t - t0 - 1
+            for p in self.pipelines:
+                for d in p.devices:
+                    if d.state == Device.IDLE:
+                        d.idle_time += dt
+        self.time = next_t
 
     def reset_time(self):
         self.time = 0
@@ -112,7 +173,7 @@ class Executor:
                 pipeline.check_device_status(time=self.time)
                 finish_count += pipeline.num_finished_microbatch
             self.finish_flag = True if finish_count == self.get_total_workload_count() else False
-            self.update_time()
+            self._advance_simulation_time(time_limit)
 
         if verbose:
             print(f"Time: {self.get_time()}, Finish: {self.finish_flag}")
@@ -142,7 +203,7 @@ class Executor:
                 pipeline.check_device_status(time=self.time)
                 fc += pipeline.num_finished_microbatch
             self.finish_flag = fc == self.get_total_workload_count()
-            self.update_time()
+            self._advance_simulation_time(time_limit)
         T = max(max(p.get_device_execution_time()) for p in self.pipelines)
         idle0 = list(self.pipelines[0].get_device_bubble_time())
         return T, idle0
@@ -625,7 +686,7 @@ class Executor:
                         if pipeline.pid == 1:
                             pipeline.insert_workload(workloads=workloads,did_group=[2])
             self.finish_flag = True if finish_count == self.get_total_workload_count() else False
-            self.update_time()
+            self._advance_simulation_time(time_limit)
         if show_success:
             if self.finish_flag:
                 if show_partition and show_placement:

@@ -10,9 +10,9 @@ from simulator.abstract.context import (
     refresh_run_output_paths,
 )
 from Executor import Executor
+import math
 
-
-def preprocess_head_times(times, arch=None, *, vocab_parallel: bool = False, device_num: int = None):
+def preprocess_head_times(times, arch=None, *, vocab_parallel: bool = False, device_num: int = None, scale: int = 100):
     """
     Given per-layer times and an architecture/type list (arch),
     estimate per-(sub)type average time and return a new list where each layer's
@@ -79,7 +79,7 @@ def preprocess_head_times(times, arch=None, *, vocab_parallel: bool = False, dev
             filled.append(sum(avgs[p] for p in ps))
         else:
             filled.append(float(t))
-
+    filled = [math.ceil(t*scale) for t in filled]
     if not vocab_parallel:
         return filled
 
@@ -106,6 +106,8 @@ def preprocess_head_times(times, arch=None, *, vocab_parallel: bool = False, dev
             extra_h.append(h_t / float(device_num))
         else:
             new_times.append(float(t))
+    new_times = [math.ceil(t*scale) for t in new_times]
+    extra_h = [math.ceil(t*scale) for t in extra_h]
     return new_times + extra_h
 
 
@@ -154,9 +156,10 @@ def main():
 
     vocab_parallel = False if schedule_method == Schedule.OctoPipe else False
     arch = gpc.get("ARCH")
-    f_times = preprocess_head_times(gpc["F_TIMES"], arch, vocab_parallel=vocab_parallel)
-    b_times = preprocess_head_times(gpc["B_TIMES"], arch, vocab_parallel=vocab_parallel)
-    w_times = preprocess_head_times(gpc["W_TIMES"], arch, vocab_parallel=vocab_parallel)
+    scale = 10
+    f_times = preprocess_head_times(gpc["F_TIMES"], arch, vocab_parallel=vocab_parallel, scale=scale)
+    b_times = preprocess_head_times(gpc["B_TIMES"], arch, vocab_parallel=vocab_parallel, scale=scale)
+    w_times = preprocess_head_times(gpc["W_TIMES"], arch, vocab_parallel=vocab_parallel, scale=scale)
     layer_num = len(f_times)
     tc = TrainingConfig(
         pp_size=gpc["DEVICE_NUM"],
@@ -182,6 +185,7 @@ def main():
     refresh_run_output_paths(gpc, micro_batch_num=tc.micro_batch_num)
 
     executor = Executor(
+        discrete_event_time=False,
         schedule_method=schedule_method,
         tc=tc,
         nmb_per_dp=[4 * gpc["DEVICE_NUM"]],
@@ -206,7 +210,7 @@ def main():
         # Total random swap attempts from near–load-optimal bases (spread across bases).
 
         # Phase 2: full simulator on first tune_sim_k placements from Phase 1.
-        tune_sim_k = 256
+        tune_sim_k = 64
 
         # Phase 3: neighbour pool / local search
         tune_local_search_rounds = 3
@@ -298,7 +302,15 @@ def main():
         # partition = [16, 16, 16, 8]
         # partition = [10, 10, 10, 10]
         # placement = [[i] for i in range(gpc["DEVICE_NUM"])]
-        executor.one_step_tuning(time_limit=100000, placement=placement, partition=partition, verbose=True)
+        if gpc["PROFILE_GENERATION"]:
+            profiler = cProfile.Profile()
+            profiler.enable()
+            executor.one_step_tuning(time_limit=100000, placement=placement, partition=partition, verbose=True)
+            profiler.disable()
+            stats = pstats.Stats(profiler).sort_stats("cumtime")
+            stats.print_stats(20)  # 打印前 10 个耗时函数
+        else:
+            executor.one_step_tuning(time_limit=100000, placement=placement, partition=partition, verbose=True)
 
     DRAW = True
     if DRAW:
