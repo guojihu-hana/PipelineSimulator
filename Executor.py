@@ -11,9 +11,12 @@ from tuning import (
     tune_placement, tune_partition_random, tune_placement_random,
     tune_partition_dfs, tune_placement_dfs, tune_partition,
     solve_placement_min_pp_comp_time,
+    fast_octopipe_estimate,
+    solve_placement_guided,
 )
 import random
 import math
+import heapq
 
 
 class Executor:
@@ -138,44 +141,82 @@ class Executor:
 
     def iterative_tuning(self, iter_limit=100, time_limit=gpc["TIME_LIMIT"],
                          placement=None, partition=None, verbose=False,
-                         beam_width=512, top_n=2048, local_search_rounds=3):
+                         beam_width=1024, top_n=200, local_search_rounds=3,
+                         sim_k=64, ls_neighbor_cap=512):
+        """
+        Three-phase placement optimiser for OctoPipe scheduling (single-threaded).
+
+        Phase 1 — Fast estimator-guided candidate generation
+        Phase 2 — Simulation evaluation of top-``sim_k`` candidates
+        Phase 3 — ILS with two-tier local search (fast estimator pre-filter
+                  then real simulation), perturbation kicks, and random
+                  restarts.
+
+        ``ls_neighbor_cap`` limits how many swap/transfer neighbours are
+        scored with the fast estimator per local-search round (large models
+        can have >1k neighbours); beyond the cap, a random subset is used.
+        Pass ``None`` for no cap (slowest, exhaustive neighbour scan).
+        """
+        import time as _time
+
         placement = [[lid for lid in range(did * self.layer_num // self.device_num,
                        (did + 1) * self.layer_num // self.device_num)]
                       for did in range(self.device_num)]
         partition = [1 for lid in range(self.layer_num)]
-        layer_comp_time = self.get_layer_comp_times(vocab_parallel=self.tc.vocab_parallel)
         num_stages = len(partition)
         num_pp = self.device_num
+        num_mb = self.tc.micro_batch_num
 
-        # --- Phase 1: Generate diverse candidates ---
-        placements, pp_comp_times, stage_comp_times = solve_placement_min_pp_comp_time(
-            partition, placement, layer_comp_time,
-            beam_width=beam_width, top_n=top_n,
+        layer_f = list(self.tc.layer_f_times)
+        layer_b = list(self.tc.layer_b_times)
+
+        # ----------------------------------------------------------
+        # Phase 1: fast estimator-guided candidate generation
+        # ----------------------------------------------------------
+        t0 = _time.time()
+        guided_plas, est_times, stage_f, stage_b = solve_placement_guided(
+            partition, placement, layer_f, layer_b,
+            num_mb=num_mb, beam_width=beam_width, top_n=top_n,
         )
-        if placements and isinstance(placements[0], list) and \
-                (not placements[0] or isinstance(placements[0][0], int)):
-            placements = [placements]
+        print(f"[Phase 1] {len(guided_plas)} candidates, "
+              f"best est={est_times[0]}  ({_time.time()-t0:.1f}s)")
 
-        # --- Phase 2: Evaluate all candidates via simulation ---
-        eval_results = []  # (time, placement)
-        for pla in placements:
+        # ----------------------------------------------------------
+        # Phase 2: evaluate top candidates with real simulator
+        # ----------------------------------------------------------
+        t0 = _time.time()
+        sim_k = min(sim_k, len(guided_plas))
+        eval_results = []
+        for pla in guided_plas[:sim_k]:
             t = self._simulate_placement(pla, partition, time_limit)
             eval_results.append((t, pla))
         eval_results.sort(key=lambda x: x[0])
 
         best_time = eval_results[0][0]
         best_placement = [row[:] for row in eval_results[0][1]]
-        print(f"[tuning] Phase 1: {len(placements)} candidates, best T={best_time}")
+        print(f"[Phase 2] top-{sim_k} → best T={best_time}  "
+              f"({_time.time()-t0:.1f}s)")
 
-        # --- Phase 3: Iterated Local Search (ILS) with simulation oracle ---
-        def _assigned_from_placement(pla):
+        # Adaptive simulation cap: no need to fully simulate placements
+        # that are clearly worse than the current best.
+        sim_cap = int(best_time * 2)
+
+        # ----------------------------------------------------------
+        # Phase 3: ILS
+        # ----------------------------------------------------------
+        t0 = _time.time()
+        # One tuple conversion for the hot fast-estimator loop (Python path).
+        _sf = tuple(int(x) for x in stage_f)
+        _sb = tuple(int(x) for x in stage_b)
+
+        def _a_from_p(pla):
             a = [-1] * num_stages
             for d, row in enumerate(pla):
                 for s in row:
                     a[s] = d
             return a
 
-        def _placement_from_assigned(a):
+        def _p_from_a(a):
             p = [[] for _ in range(num_pp)]
             for s, d in enumerate(a):
                 p[d].append(s)
@@ -184,7 +225,7 @@ class Executor:
         def _adj_ok(a):
             return all(a[k] != a[k - 1] for k in range(1, num_stages))
 
-        def _random_adj_placement():
+        def _random_adj():
             a = [-1] * num_stages
             for s in range(num_stages):
                 devs = list(range(num_pp))
@@ -196,116 +237,132 @@ class Executor:
                     break
             return a
 
-        def _perturb(assigned, n_kicks):
-            """Apply n_kicks random swaps to escape local optimum."""
-            a = assigned[:]
-            for _ in range(n_kicks * 3):  # retry up to 3× if adj fails
+        def _perturb(a, n):
+            b = a[:]
+            for _ in range(n * 3):
                 s1, s2 = random.sample(range(num_stages), 2)
-                a[s1], a[s2] = a[s2], a[s1]
-                if _adj_ok(a):
-                    n_kicks -= 1
-                    if n_kicks <= 0:
-                        return a
+                b[s1], b[s2] = b[s2], b[s1]
+                if _adj_ok(b):
+                    n -= 1
+                    if n <= 0:
+                        return b
                 else:
-                    a[s1], a[s2] = a[s2], a[s1]
-            return a if _adj_ok(a) else assigned
+                    b[s1], b[s2] = b[s2], b[s1]
+            return b if _adj_ok(b) else a
 
-        def _local_search(start_assigned, start_time, max_rounds=local_search_rounds):
-            """Best-improvement steepest descent."""
-            cur_a = start_assigned
-            cur_t = start_time
-            for _ in range(max_rounds):
-                best_t = cur_t
-                best_a = None
+        def _sim(a):
+            """Simulate with adaptive cap."""
+            return self._simulate_placement(_p_from_a(a), partition, sim_cap)
+
+        def _fe(a):
+            return fast_octopipe_estimate(a, _sf, _sb, num_mb, num_pp)
+
+        def _local_search(start_a, start_t, rounds=local_search_rounds):
+            cur_a, cur_t = start_a, start_t
+            for _ in range(rounds):
+                nbr_assigns = []
 
                 for s1 in range(num_stages):
                     for s2 in range(s1 + 1, num_stages):
                         if cur_a[s1] == cur_a[s2]:
                             continue
-                        new_a = cur_a[:]
-                        new_a[s1], new_a[s2] = new_a[s2], new_a[s1]
-                        if not _adj_ok(new_a):
+                        na = cur_a[:]
+                        na[s1], na[s2] = na[s2], na[s1]
+                        if not _adj_ok(na):
                             continue
-                        t = self._simulate_placement(
-                            _placement_from_assigned(new_a), partition, time_limit)
-                        if t < best_t:
-                            best_t = t
-                            best_a = new_a
+                        nbr_assigns.append(na)
 
                 for s in range(num_stages):
                     for d in range(num_pp):
                         if d == cur_a[s]:
                             continue
-                        new_a = cur_a[:]
-                        new_a[s] = d
-                        if not _adj_ok(new_a):
+                        na = cur_a[:]
+                        na[s] = d
+                        if not _adj_ok(na):
                             continue
-                        t = self._simulate_placement(
-                            _placement_from_assigned(new_a), partition, time_limit)
-                        if t < best_t:
-                            best_t = t
-                            best_a = new_a
+                        nbr_assigns.append(na)
 
-                if best_a is None:
+                if not nbr_assigns:
                     break
-                cur_a = best_a
-                cur_t = best_t
+
+                if (ls_neighbor_cap is not None
+                        and len(nbr_assigns) > ls_neighbor_cap):
+                    nbr_assigns = random.sample(nbr_assigns, ls_neighbor_cap)
+
+                estimates = [_fe(a) for a in nbr_assigns]
+                top_k = max(3, min(15, len(estimates) // 10))
+                top_idx = heapq.nsmallest(top_k, range(len(estimates)),
+                                          key=lambda i: estimates[i])
+
+                best_found_t = cur_t
+                best_found_a = None
+                for i in top_idx:
+                    t = self._simulate_placement(
+                        _p_from_a(nbr_assigns[i]), partition, sim_cap)
+                    if t < best_found_t:
+                        best_found_t = t
+                        best_found_a = nbr_assigns[i]
+
+                if best_found_a is None:
+                    break
+                cur_a, cur_t = best_found_a, best_found_t
+
             return cur_a, cur_t
 
-        # ILS from the best Phase-1 candidate.
-        ils_assigned = _assigned_from_placement(best_placement)
-        ils_time = best_time
-        ils_assigned, ils_time = _local_search(ils_assigned, ils_time)
-        if ils_time < best_time:
-            best_time = ils_time
-            best_placement = _placement_from_assigned(ils_assigned)
-        print(f"[tuning] ILS-init: T={best_time}")
+        # ILS from best Phase-2 candidate
+        ils_a = _a_from_p(best_placement)
+        ils_a, ils_t = _local_search(ils_a, best_time)
+        if ils_t < best_time:
+            best_time = ils_t
+            best_placement = _p_from_a(ils_a)
+            sim_cap = int(best_time * 2)
+        print(f"[Phase 3] After local search: T={best_time}")
 
-        # Perturbation + re-search cycles.
-        no_improve_count = 0
+        # Perturbation kicks
+        no_improve = 0
         for kick in range(local_search_rounds * 5):
-            n_kicks = random.randint(3, max(5, num_stages // 4))
-            perturbed = _perturb(ils_assigned, n_kicks)
-            p_time = self._simulate_placement(
-                _placement_from_assigned(perturbed), partition, time_limit)
-            new_a, new_t = _local_search(perturbed, p_time)
-            if new_t < best_time:
-                best_time = new_t
-                best_placement = _placement_from_assigned(new_a)
-                ils_assigned = new_a
-                ils_time = new_t
-                no_improve_count = 0
-                print(f"[tuning] ILS-kick {kick}: T={best_time}")
+            n = random.randint(3, max(5, num_stages // 4))
+            pa = _perturb(ils_a, n)
+            pt = _sim(pa)
+            na, nt = _local_search(pa, pt)
+            if nt < best_time:
+                best_time = nt
+                best_placement = _p_from_a(na)
+                ils_a, ils_t = na, nt
+                sim_cap = int(best_time * 2)
+                no_improve = 0
+                print(f"[Phase 3] Kick {kick}: T={best_time}")
             else:
-                no_improve_count += 1
-                if no_improve_count >= 5:
+                no_improve += 1
+                if no_improve >= 5:
                     break
 
-        # Also try ILS from a few fresh random placements (different basins).
+        # Random restarts from different basins
         for ri in range(min(5, local_search_rounds)):
-            rand_a = _random_adj_placement()
-            rand_t = self._simulate_placement(
-                _placement_from_assigned(rand_a), partition, time_limit)
-            opt_a, opt_t = _local_search(rand_a, rand_t)
-            if opt_t < best_time:
-                best_time = opt_t
-                best_placement = _placement_from_assigned(opt_a)
-                print(f"[tuning] ILS-rand {ri}: T={best_time}")
-            # ILS kicks from this random optimum too.
+            ra = _random_adj()
+            rt = _sim(ra)
+            oa, ot = _local_search(ra, rt)
+            if ot < best_time:
+                best_time = ot
+                best_placement = _p_from_a(oa)
+                sim_cap = int(best_time * 2)
+                print(f"[Phase 3] Random {ri}: T={best_time}")
             for kick in range(3):
-                n_kicks = random.randint(3, max(5, num_stages // 4))
-                perturbed = _perturb(opt_a, n_kicks)
-                p_time = self._simulate_placement(
-                    _placement_from_assigned(perturbed), partition, time_limit)
-                new_a, new_t = _local_search(perturbed, p_time)
-                if new_t < best_time:
-                    best_time = new_t
-                    best_placement = _placement_from_assigned(new_a)
-                    print(f"[tuning] ILS-rand {ri} kick {kick}: T={best_time}")
+                n = random.randint(3, max(5, num_stages // 4))
+                pa = _perturb(oa, n)
+                pt = _sim(pa)
+                na, nt = _local_search(pa, pt)
+                if nt < best_time:
+                    best_time = nt
+                    best_placement = _p_from_a(na)
+                    sim_cap = int(best_time * 2)
+                    print(f"[Phase 3] Random {ri} kick {kick}: "
+                          f"T={best_time}")
 
-        print(f"[tuning] Final best T={best_time}")
+        print(f"[Tuning] Final best T={best_time}  "
+              f"({_time.time()-t0:.1f}s)")
 
-        # Re-run with best placement so saved artifacts are correct.
+        # Re-run with best placement to save artifacts.
         if best_placement is not None:
             self.one_step_tuning(time_limit=time_limit, placement=best_placement,
                                  partition=partition, verbose=verbose)

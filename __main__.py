@@ -189,7 +189,7 @@ def main():
         device_comp_power=[[1 for _ in range(gpc["DEVICE_NUM"])] for _ in range(1)]
     )
     iter_tuning = True if schedule_method == Schedule.OctoPipe else False
-
+    gpc["PROFILE_GENERATION"] = True
     if iter_tuning:
         if schedule_method == Schedule.OctoPipe:
             partition = [1 for _ in range(gpc["LAYER_NUM"])]
@@ -197,14 +197,14 @@ def main():
             if gpc["PROFILE_GENERATION"]:
                 profiler = cProfile.Profile()
                 profiler.enable()
-                executor.iterative_tuning(iter_limit=100, placement=placement, partition=partition)
+                executor.iterative_tuning(iter_limit=100, beam_width=1024, top_n=2048, placement=placement, partition=partition, verbose=True, sim_k=64, ls_neighbor_cap=None)
                 profiler.disable()
 
                 stats = pstats.Stats(profiler).sort_stats("cumtime")
                 stats.print_stats(20)  # 打印前 10 个耗时函数
             else:
                 # tune_strategy 0: octopipe, 1:random, 2:dfs
-                executor.iterative_tuning(iter_limit=100, beam_width=1024, top_n=2048, placement=placement, partition=partition, verbose=True)
+                executor.iterative_tuning(iter_limit=100, beam_width=1024, top_n=2048, placement=placement, partition=partition, verbose=True, sim_k=64, ls_neighbor_cap=None)
         else:
             executor.run_all_dp()
     else:

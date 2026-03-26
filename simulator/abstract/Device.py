@@ -295,9 +295,11 @@ class Device:
         return count
 
     def update_constraints_within_device(self, time, constraint: Workload):
+        # Hoisted: same for every sid; avoids O(#stages) useless iterations when
+        # this device does not hold the micro-batch referenced by the constraint.
+        if constraint.mid not in self.held_mids:
+            return
         for sid in self.stages:
-            if constraint.mid not in self.held_mids:
-                continue
             updated_workload = self.stages[sid].update_constraints_within_stage(time, constraint=constraint)
             if updated_workload and updated_workload.is_executable(time):
                 self.executable_workloads.push(updated_workload)

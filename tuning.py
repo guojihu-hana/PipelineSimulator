@@ -2,6 +2,9 @@ from re import I
 import time
 import random
 import heapq
+import os
+import ctypes
+import tempfile
 from functools import wraps
 from collections import defaultdict
 
@@ -125,6 +128,435 @@ def balanced_transpose(placement, layer_comp_time):
         row.sort()
     new_place.sort(key=lambda row: row[0] if row else 1e9)
     return new_place
+
+_C_SRC = r"""
+#include <stdlib.h>
+#include <string.h>
+
+int fast_octopipe_est(
+    const int *assigned, const int *stage_f, const int *stage_b,
+    int S, int D, int M)
+{
+    int *dev_free = (int *)calloc(D, sizeof(int));
+    int *dev_last = (int *)malloc(D * sizeof(int));
+    for (int i = 0; i < D; i++) dev_last[i] = 2;
+
+    int cap = (M * S + 4) * 4;
+    int **dq = (int **)malloc(D * sizeof(int *));
+    int *dqn = (int *)calloc(D, sizeof(int));
+    for (int d = 0; d < D; d++)
+        dq[d] = (int *)malloc(cap * sizeof(int));
+
+    int d0 = assigned[0];
+    for (int mid = 0; mid < M; mid++) {
+        int n = dqn[d0];
+        dq[d0][n]=0; dq[d0][n+1]=0; dq[d0][n+2]=mid; dq[d0][n+3]=0;
+        dqn[d0] += 4;
+    }
+
+    int done = 0, target = M * S * 2, Sm1 = S - 1;
+    long long KS = (long long)(S * M + 1);
+    long long KP = 1LL << 55;
+
+    while (done < target) {
+        int gd = -1, gi = -1, gs = 0x7fffffff;
+
+        for (int d = 0; d < D; d++) {
+            int *q = dq[d];
+            int qn = dqn[d];
+            if (qn == 0) continue;
+
+            int fr = dev_free[d];
+            int pref = (dev_last[d] == 0) ? 1 : 0;
+
+            long long lb = 0x7fffffffffffffffLL;
+            int li = -1, ls = 0x7fffffff;
+
+            for (int i = 0; i < qn; i += 4) {
+                int rt = q[i], wt = q[i+1], mid = q[i+2], sid = q[i+3];
+                int st = (fr >= rt) ? fr : rt;
+                long long p = (wt == pref) ? 0 : KP;
+                long long tb = (wt == 0) ? (long long)mid * S + sid
+                                         : (long long)(Sm1 - sid) * M + mid;
+                long long key = p + (long long)st * KS + tb;
+                if (key < lb) { lb = key; li = i; ls = st; }
+            }
+            if (li >= 0 && ls < gs) { gd = d; gi = li; gs = ls; }
+        }
+        if (gd < 0) break;
+
+        int *q = dq[gd];
+        int wt = q[gi+1], mid = q[gi+2], sid = q[gi+3];
+        int tail = dqn[gd] - 4;
+        if (gi != tail) {
+            q[gi]=q[tail]; q[gi+1]=q[tail+1];
+            q[gi+2]=q[tail+2]; q[gi+3]=q[tail+3];
+        }
+        dqn[gd] -= 4;
+
+        int dur = (wt == 0) ? stage_f[sid] : stage_b[sid];
+        int end = gs + dur;
+        dev_free[gd] = end;
+        done++;
+
+        if (wt == 0) {
+            dev_last[gd] = 0;
+            if (sid < Sm1) {
+                int dn = assigned[sid+1]; int n = dqn[dn];
+                dq[dn][n]=end; dq[dn][n+1]=0; dq[dn][n+2]=mid; dq[dn][n+3]=sid+1;
+                dqn[dn] += 4;
+            }
+            if (sid == Sm1) {
+                int n = dqn[gd];
+                q[n]=end; q[n+1]=1; q[n+2]=mid; q[n+3]=sid;
+                dqn[gd] += 4;
+            }
+        } else {
+            dev_last[gd] = 1;
+            if (sid > 0) {
+                int dp = assigned[sid-1]; int n = dqn[dp];
+                dq[dp][n]=end; dq[dp][n+1]=1; dq[dp][n+2]=mid; dq[dp][n+3]=sid-1;
+                dqn[dp] += 4;
+            }
+        }
+    }
+
+    int result = 0;
+    for (int d = 0; d < D; d++) {
+        if (dev_free[d] > result) result = dev_free[d];
+        free(dq[d]);
+    }
+    free(dq); free(dqn); free(dev_free); free(dev_last);
+    return result;
+}
+"""
+
+def _load_c_estimator():
+    """Compile C fast estimator at import time; return (cfunc, ArrayType) or None."""
+    try:
+        cache = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             '_fast_est.so')
+        src_path = cache.replace('.so', '.c')
+        if not os.path.exists(cache):
+            with open(src_path, 'w') as f:
+                f.write(_C_SRC)
+            import subprocess
+            subprocess.check_call(
+                ['cc', '-O2', '-shared', '-fPIC', '-o', cache, src_path],
+                stderr=subprocess.DEVNULL)
+        lib = ctypes.CDLL(cache)
+        fn = lib.fast_octopipe_est
+        fn.restype = ctypes.c_int
+        fn.argtypes = [ctypes.POINTER(ctypes.c_int)] * 3 + [ctypes.c_int] * 3
+        return fn
+    except Exception:
+        return None
+
+_c_est_fn = _load_c_estimator()
+_c_int_arr = ctypes.c_int * 1  # placeholder; real arrays created per-call
+
+
+def fast_octopipe_estimate(assigned, stage_f, stage_b, num_mb, num_devices):
+    """
+    Lightweight event-driven OctoPipe scheduling estimator.
+
+    Models the actual OctoPipe behaviour (with CONSTRAIN_WARMUP=False,
+    SWITCH_WORKLOAD_TYPE=True, bwd_split=False):
+      - F(mid, sid=0) is ready at t=0 for every micro-batch.
+      - F(mid, sid) depends on F(mid, sid-1).
+      - B(mid, S-1) depends on F(mid, S-1).
+      - B(mid, sid) depends on B(mid, sid+1).
+      - Each device runs exactly one workload at a time.
+      - Alternation: after F prefer B, after B prefer F.
+      - Tie-breaking: F by (mid, sid); B by (-sid, mid) — matches OrderedQueue.
+
+    Returns estimated makespan (int).
+    """
+    S = len(assigned)
+    D = num_devices
+    M = num_mb
+
+    if _c_est_fn is not None:
+        ArrS = ctypes.c_int * S
+        return _c_est_fn(
+            ArrS(*(int(x) for x in assigned)),
+            ArrS(*(int(x) for x in stage_f)),
+            ArrS(*(int(x) for x in stage_b)),
+            S, D, M)
+
+    # Pre-convert to tuples for faster repeated indexing (skip if already tuples)
+    if isinstance(stage_f, tuple) and isinstance(stage_b, tuple):
+        _sf, _sb = stage_f, stage_b
+    else:
+        _sf = tuple(int(x) for x in stage_f)
+        _sb = tuple(int(x) for x in stage_b)
+    _asgn = tuple(assigned)
+
+    dev_free = [0] * D
+    dev_last = [2] * D          # 2=none, 0=F, 1=B
+    # Per-device queues stored as flat lists: [rt, wt, mid, sid, ...]
+    # 4 ints per entry.  Avoids tuple allocation in the hot loop.
+    dq = [[] for _ in range(D)]
+
+    d0 = _asgn[0]
+    q0 = dq[d0]
+    for mid in range(M):
+        q0.append(0); q0.append(0); q0.append(mid); q0.append(0)
+
+    done = 0
+    target = M * S * 2
+    INF = 1 << 60
+    Sm1 = S - 1
+
+    # Encoding for single-integer comparison key to avoid tuple alloc:
+    #   key = pref_bit * KEY_PREF + start * KEY_START + tie_breaker
+    # F tie-break: mid * S + sid          (range 0 .. M*S-1)
+    # B tie-break: (S-1-sid) * M + mid    (range 0 .. S*M-1)
+    # Both fit in < 20 bits for any practical size.
+    _KEY_START = S * M + 1          # multiplier for start time
+    _KEY_PREF  = INF >> 1           # multiplier for preference bit
+
+    while done < target:
+        gbest_d = -1
+        gbest_i = -1    # index (in units of 4) inside dq[gbest_d]
+        gbest_start = INF
+
+        for d in range(D):
+            q = dq[d]
+            qlen = len(q)
+            if qlen == 0:
+                continue
+
+            free = dev_free[d]
+            last = dev_last[d]
+            pref = 1 if last == 0 else 0
+
+            lbest = INF
+            lbest_i = -1
+            lbest_start = INF
+
+            i = 0
+            while i < qlen:
+                rt  = q[i]
+                wt  = q[i + 1]
+                mid = q[i + 2]
+                sid = q[i + 3]
+
+                start = free if free >= rt else rt
+                p = 0 if wt == pref else _KEY_PREF
+                tb = mid * S + sid if wt == 0 else (Sm1 - sid) * M + mid
+                key = p + start * _KEY_START + tb
+
+                if key < lbest:
+                    lbest = key
+                    lbest_i = i
+                    lbest_start = start
+
+                i += 4
+
+            # Cross-device: compare by start time only (matching
+            # real simulator where devices execute independently).
+            if lbest_i >= 0 and lbest_start < gbest_start:
+                gbest_d = d
+                gbest_i = lbest_i
+                gbest_start = lbest_start
+
+        if gbest_d < 0:
+            break
+
+        d = gbest_d
+        q = dq[d]
+        bi = gbest_i
+        wt  = q[bi + 1]
+        mid = q[bi + 2]
+        sid = q[bi + 3]
+
+        # O(1) removal: overwrite with last entry, then pop tail
+        tail = len(q) - 4
+        if bi != tail:
+            q[bi] = q[tail]; q[bi+1] = q[tail+1]
+            q[bi+2] = q[tail+2]; q[bi+3] = q[tail+3]
+        del q[tail:tail+4]
+
+        dur = _sf[sid] if wt == 0 else _sb[sid]
+        end = gbest_start + dur
+        dev_free[d] = end
+        done += 1
+
+        if wt == 0:  # Forward
+            dev_last[d] = 0
+            if sid < Sm1:
+                nq = dq[_asgn[sid + 1]]
+                nq.append(end); nq.append(0); nq.append(mid); nq.append(sid + 1)
+            if sid == Sm1:
+                q.append(end); q.append(1); q.append(mid); q.append(sid)
+        else:  # Backward
+            dev_last[d] = 1
+            if sid > 0:
+                pq = dq[_asgn[sid - 1]]
+                pq.append(end); pq.append(1); pq.append(mid); pq.append(sid - 1)
+
+    return max(dev_free)
+
+
+def solve_placement_guided(
+    model_partition,
+    model_placement,
+    layer_f_times_per_layer,
+    layer_b_times_per_layer,
+    *,
+    num_mb: int = 8,
+    beam_width: int = 512,
+    top_n: int = 200,
+    normalize_equal_cost_blocks: bool = True,
+):
+    """
+    Guided placement solver using a fast OctoPipe scheduling estimator.
+
+    Strategy:
+      1) Build per-stage F/B times from partition + layer times.
+      2) Generate diverse candidate placements:
+         a) All 24 device-permutations of the interleaved pattern.
+         b) Interleaved + targeted swaps of outlier stages.
+         c) Cost-aware constructive beam search.
+         d) Random adjacency-satisfying placements.
+      3) Rank all candidates by the fast scheduling estimator.
+      4) Return top-N for simulation evaluation.
+
+    Returns:
+      placements_list, estimated_times, stage_f_times, stage_b_times
+    """
+    import itertools as _it
+
+    num_pp = len(model_placement)
+    num_stages = len(model_partition)
+
+    # Build per-stage F/B times.
+    prefix = [0]
+    for p in model_partition:
+        prefix.append(prefix[-1] + int(p))
+
+    stage_f = []
+    stage_b = []
+    for k in range(num_stages):
+        stage_f.append(sum(layer_f_times_per_layer[prefix[k]:prefix[k + 1]]))
+        stage_b.append(sum(layer_b_times_per_layer[prefix[k]:prefix[k + 1]]))
+
+    def _adj_ok(a):
+        return all(a[k] != a[k - 1] for k in range(1, num_stages))
+
+    def _place_from_assigned(a):
+        p = [[] for _ in range(num_pp)]
+        for s, d in enumerate(a):
+            p[d].append(s)
+        for row in p:
+            row.sort()
+        return p
+
+    seen = set()
+    candidates = []  # list of (assigned_tuple,)
+
+    def _add(a):
+        sig = tuple(a)
+        if sig in seen:
+            return
+        seen.add(sig)
+        candidates.append(list(a))
+
+    # --- Strategy A: All permutations of the interleaved base ---
+    base = [s % num_pp for s in range(num_stages)]
+    if num_pp <= 6:
+        for perm in _it.permutations(range(num_pp)):
+            a = [perm[s % num_pp] for s in range(num_stages)]
+            if _adj_ok(a):
+                _add(a)
+
+    # --- Strategy B: Interleaved + targeted swaps of outlier stages ---
+    avg_f = sum(stage_f) / num_stages
+    outlier_sids = [s for s in range(num_stages) if abs(stage_f[s] - avg_f) > avg_f * 0.3]
+    normal_sids = [s for s in range(num_stages) if s not in outlier_sids]
+    for _ in range(min(beam_width, 200)):
+        a = list(base)
+        if outlier_sids and normal_sids:
+            o = random.choice(outlier_sids)
+            n = random.choice(normal_sids)
+            a[o], a[n] = a[n], a[o]
+        else:
+            s1, s2 = random.sample(range(num_stages), 2)
+            a[s1], a[s2] = a[s2], a[s1]
+        if _adj_ok(a):
+            _add(a)
+
+    # --- Strategy C: Constructive beam search (guided by fast estimator) ---
+    cbeam = [[-1] * num_stages]
+    for sid in range(num_stages):
+        next_beam = []
+        for assigned in cbeam:
+            for d in range(num_pp):
+                if sid > 0 and assigned[sid - 1] == d:
+                    continue
+                new_a = assigned[:]
+                new_a[sid] = d
+                next_beam.append(new_a)
+        # Prune: keep only top-K by partial load balance
+        def _partial_score(a):
+            load = [0.0] * num_pp
+            for s in range(sid + 1):
+                load[a[s]] += stage_f[s] + stage_b[s]
+            return max(load) - min(l for l in load if l > 0 or sid < num_pp)
+        next_beam.sort(key=_partial_score)
+        cbeam = next_beam[:min(24, beam_width // 8)]
+    for a in cbeam:
+        if -1 not in a and _adj_ok(a):
+            _add(a)
+
+    # --- Strategy D: Random placements ---
+    for _ in range(min(beam_width, 300)):
+        a = [-1] * num_stages
+        for s in range(num_stages):
+            devs = list(range(num_pp))
+            random.shuffle(devs)
+            for d in devs:
+                if s > 0 and a[s - 1] == d:
+                    continue
+                a[s] = d
+                break
+        if _adj_ok(a):
+            _add(a)
+
+    # --- Strategy E: Interleaved + random multi-swaps ---
+    for _ in range(min(beam_width, 200)):
+        a = list(base)
+        n_swaps = random.randint(1, min(5, num_stages // 2))
+        for __ in range(n_swaps):
+            s1, s2 = random.sample(range(num_stages), 2)
+            a[s1], a[s2] = a[s2], a[s1]
+        if _adj_ok(a):
+            _add(a)
+
+    if not candidates:
+        raise RuntimeError("No feasible candidates generated.")
+
+    # --- Rank by fast scheduling estimator ---
+    scored = []
+    for a in candidates:
+        est = fast_octopipe_estimate(a, stage_f, stage_b, num_mb, num_pp)
+        scored.append((est, a))
+    scored.sort(key=lambda x: x[0])
+
+    # --- Return top-N ---
+    results = []
+    for est, a in scored[:top_n]:
+        place = _place_from_assigned(a)
+        if normalize_equal_cost_blocks:
+            stage_comp_times = [sf + sb for sf, sb in zip(stage_f, stage_b)]
+            place = normalize_equal_cost_blocks_round_robin(place, stage_comp_times)
+        results.append((place, est))
+
+    placements = [r[0] for r in results]
+    est_times = [r[1] for r in results]
+    return placements, est_times, stage_f, stage_b
+
 
 def solve_placement_min_pp_comp_time(
     model_partition,

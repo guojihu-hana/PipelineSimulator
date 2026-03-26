@@ -159,48 +159,50 @@ class Stage:
         c_sid = constraint.sid
         c_mid = constraint.mid
         c_wlt = constraint.wtype
-        cstr = WorkloadConstraint(
-            device_id=c_did,
-            stage_id=c_sid, 
-            microbatch_id=c_mid, 
-            workload_type=c_wlt
-        )
+        # WorkloadConstraint only when a dependency edge matches (most
+        # (stage, constraint) pairs do not — avoids millions of allocations).
         if c_wlt == WorkloadType.F:
             if self.sid == c_sid + 1:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
                 return self.workloads[c_mid][c_wlt]
             elif self.sid == c_sid and self.sid == constraint.total_stage_num - 1:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
                 return self.workloads[c_mid][WorkloadType.B]
         elif c_wlt == WorkloadType.B:
             if self.sid == c_sid - 1:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][c_wlt].update_constraints(time, cstr)
                 return self.workloads[c_mid][c_wlt]
             elif self.sid == c_sid and self.bwd_split:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][WorkloadType.W].update_constraints(time, cstr)
                 return self.workloads[c_mid][WorkloadType.W]
         elif c_wlt == WorkloadType.R:
             if self.sid == c_sid:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
                 return self.workloads[c_mid][WorkloadType.B]
         elif c_wlt == WorkloadType.W:
             if self.sid == c_sid - 1:
+                cstr = WorkloadConstraint(
+                    device_id=c_did, stage_id=c_sid,
+                    microbatch_id=c_mid, workload_type=c_wlt)
                 self.workloads[c_mid][WorkloadType.B].update_constraints(time, cstr)
                 return self.workloads[c_mid][WorkloadType.B]
         else:
             return None
-
-        # for mid in self.workloads:
-        #     for wlt in self.workloads[mid]:
-        #         self.workloads[mid][wlt].update_constraints(
-        #             time,
-        #             WorkloadConstraint(
-        #                 device_id=constraint.did,
-        #                 stage_id=constraint.sid, 
-        #                 microbatch_id=constraint.mid, 
-        #                 workload_type=constraint.wtype
-        #             )
-        #         ) 
 
     def update_memory_usage(self, workload:Workload, sim = False):
         begin_memory = self.memory_usage
