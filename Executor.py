@@ -118,12 +118,18 @@ class Executor:
             print(f"Time: {self.get_time()}, Finish: {self.finish_flag}")
             for pipeline in self.pipelines:
                 pipeline.print_device_utilization(self.get_time())
+                pipeline.print_partition_placement()
 
         for pipeline in self.pipelines:
             pipeline.save_partition()
 
     def _simulate_placement(self, placement, partition, time_limit):
-        """Run one simulation and return the makespan (max device finish time)."""
+        """Run one simulation; return (makespan, per-device idle ticks on DP0).
+
+        ``idle`` matches ``Pipeline.get_device_bubble_time()`` (bubble proxy);
+        used to bias layout moves toward devices with high bubble / low static
+        compute.
+        """
         self._init_pipelines(placement=placement, partition=partition)
         self.reset_time()
         self.finish_flag = False
@@ -137,7 +143,9 @@ class Executor:
                 fc += pipeline.num_finished_microbatch
             self.finish_flag = fc == self.get_total_workload_count()
             self.update_time()
-        return max(max(p.get_device_execution_time()) for p in self.pipelines)
+        T = max(max(p.get_device_execution_time()) for p in self.pipelines)
+        idle0 = list(self.pipelines[0].get_device_bubble_time())
+        return T, idle0
 
     def iterative_tuning(self, iter_limit=100, time_limit=gpc["TIME_LIMIT"],
                          placement=None, partition=None, verbose=False,
@@ -146,11 +154,19 @@ class Executor:
         """
         Three-phase placement optimiser for OctoPipe scheduling (single-threaded).
 
-        Phase 1 — Fast estimator-guided candidate generation
+        Phase 1 — Candidate generation ranks primarily by **min–max per-device
+                  compute** (layer/stage load balance), then by the fast
+                  OctoPipe estimator for **layout**; includes placements that
+                  slightly relax balance to explore more schedules.
         Phase 2 — Simulation evaluation of top-``sim_k`` candidates
-        Phase 3 — ILS with two-tier local search (fast estimator pre-filter
-                  then real simulation), perturbation kicks, and random
-                  restarts.
+        Phase 3 — ILS with two-tier local search: neighbours are ranked by
+                  max-device static compute, fast estimate, then a **bubble
+                  heuristic** (last sim's per-device idle vs makespan and
+                  static F+B per device) so swaps/moves that shift work toward
+                  high-bubble, low-compute devices are tried first; when
+                  ``ls_neighbor_cap`` applies, the same heuristic picks which
+                  neighbours enter the pool. Perturbation kicks and random
+                  restarts unchanged aside from using the richer sim return.
 
         ``ls_neighbor_cap`` limits how many swap/transfer neighbours are
         scored with the fast estimator per local-search round (large models
@@ -188,12 +204,13 @@ class Executor:
         sim_k = min(sim_k, len(guided_plas))
         eval_results = []
         for pla in guided_plas[:sim_k]:
-            t = self._simulate_placement(pla, partition, time_limit)
-            eval_results.append((t, pla))
+            t, idle0 = self._simulate_placement(pla, partition, time_limit)
+            eval_results.append((t, pla, idle0))
         eval_results.sort(key=lambda x: x[0])
 
         best_time = eval_results[0][0]
         best_placement = [row[:] for row in eval_results[0][1]]
+        best_idle = list(eval_results[0][2])
         print(f"[Phase 2] top-{sim_k} → best T={best_time}  "
               f"({_time.time()-t0:.1f}s)")
 
@@ -208,6 +225,49 @@ class Executor:
         # One tuple conversion for the hot fast-estimator loop (Python path).
         _sf = tuple(int(x) for x in stage_f)
         _sb = tuple(int(x) for x in stage_b)
+        _sc = tuple(_sf[i] + _sb[i] for i in range(num_stages))
+
+        def _max_dev_comp(a):
+            ld = [0] * num_pp
+            for s, d in enumerate(a):
+                ld[d] += _sc[s]
+            return max(ld)
+
+        def _bubble_layout_benefit(cur_a, na, idle_per_dev, makespan):
+            """How much a neighbor moves compute toward high-bubble, low-static devices.
+
+            Uses last sim: bubble ratio ~ idle/T, static load from stage comp sums.
+            Larger is better (prefer simulating these neighbors first).
+            """
+            if (idle_per_dev is None or makespan is None
+                    or makespan <= 0 or len(idle_per_dev) != num_pp):
+                return 0.0
+            Tm = float(makespan)
+            bubble = [idle_per_dev[d] / Tm for d in range(num_pp)]
+            static_ld = [0.0] * num_pp
+            for s, d in enumerate(cur_a):
+                static_ld[d] += float(_sc[s])
+            mx = max(static_ld) if static_ld else 1.0
+            if mx <= 0:
+                mx = 1.0
+            # High bubble / low static → want to assign more comp here.
+            pressure = [
+                bubble[d] - 0.25 * (static_ld[d] / mx)
+                for d in range(num_pp)
+            ]
+            diffs = [s for s in range(num_stages) if cur_a[s] != na[s]]
+            if len(diffs) == 2:
+                s1, s2 = diffs
+                d1, d2 = cur_a[s1], cur_a[s2]
+                delta1 = float(_sc[s2]) - float(_sc[s1])
+                delta2 = float(_sc[s1]) - float(_sc[s2])
+                return pressure[d1] * delta1 + pressure[d2] * delta2
+            if len(diffs) == 1:
+                s = diffs[0]
+                d_from, d_to = cur_a[s], na[s]
+                w = float(_sc[s])
+                return pressure[d_to] * w - pressure[d_from] * w
+            return 0.0
 
         def _a_from_p(pla):
             a = [-1] * num_stages
@@ -250,15 +310,39 @@ class Executor:
                     b[s1], b[s2] = b[s2], b[s1]
             return b if _adj_ok(b) else a
 
+        def _perturb_loose_balance(a, n, slack=0.07):
+            """Random swaps that may worsen max-device compute by up to ``slack``."""
+            if num_stages < 2:
+                return a
+            b = a[:]
+            m0 = float(_max_dev_comp(b))
+            cap = m0 * (1.0 + slack)
+            left = n
+            for _ in range(n * 8):
+                if left <= 0:
+                    break
+                s1, s2 = random.sample(range(num_stages), 2)
+                b[s1], b[s2] = b[s2], b[s1]
+                if not _adj_ok(b):
+                    b[s1], b[s2] = b[s2], b[s1]
+                    continue
+                if float(_max_dev_comp(b)) <= cap:
+                    left -= 1
+                else:
+                    b[s1], b[s2] = b[s2], b[s1]
+            return b if _adj_ok(b) else a
+
         def _sim(a):
-            """Simulate with adaptive cap."""
+            """Simulate with adaptive cap; returns (makespan, idle_vec_dp0)."""
             return self._simulate_placement(_p_from_a(a), partition, sim_cap)
 
         def _fe(a):
             return fast_octopipe_estimate(a, _sf, _sb, num_mb, num_pp)
 
-        def _local_search(start_a, start_t, rounds=local_search_rounds):
+        def _local_search(start_a, start_t, start_idle=None,
+                          rounds=local_search_rounds):
             cur_a, cur_t = start_a, start_t
+            cur_idle = (list(start_idle) if start_idle is not None else None)
             for _ in range(rounds):
                 nbr_assigns = []
 
@@ -285,33 +369,50 @@ class Executor:
                 if not nbr_assigns:
                     break
 
+                max_loads = [_max_dev_comp(a) for a in nbr_assigns]
+                benefits = [
+                    _bubble_layout_benefit(cur_a, na, cur_idle, cur_t)
+                    for na in nbr_assigns
+                ]
                 if (ls_neighbor_cap is not None
                         and len(nbr_assigns) > ls_neighbor_cap):
-                    nbr_assigns = random.sample(nbr_assigns, ls_neighbor_cap)
+                    idxs = list(range(len(nbr_assigns)))
+                    idxs.sort(key=lambda i: (max_loads[i], -benefits[i]))
+                    idxs = idxs[:ls_neighbor_cap]
+                    nbr_assigns = [nbr_assigns[i] for i in idxs]
+                    max_loads = [max_loads[i] for i in idxs]
+                    benefits = [benefits[i] for i in idxs]
 
+                # Lower max-device compute, lower fast est, then higher
+                # bubble-guided benefit (shift work to high-bubble devices).
                 estimates = [_fe(a) for a in nbr_assigns]
                 top_k = max(3, min(15, len(estimates) // 10))
-                top_idx = heapq.nsmallest(top_k, range(len(estimates)),
-                                          key=lambda i: estimates[i])
+                top_idx = heapq.nsmallest(
+                    top_k, range(len(nbr_assigns)),
+                    key=lambda i: (max_loads[i], estimates[i], -benefits[i]))
 
                 best_found_t = cur_t
                 best_found_a = None
+                best_found_idle = None
                 for i in top_idx:
-                    t = self._simulate_placement(
+                    t, idle_nb = self._simulate_placement(
                         _p_from_a(nbr_assigns[i]), partition, sim_cap)
                     if t < best_found_t:
                         best_found_t = t
                         best_found_a = nbr_assigns[i]
+                        best_found_idle = idle_nb
 
                 if best_found_a is None:
                     break
                 cur_a, cur_t = best_found_a, best_found_t
+                if best_found_idle is not None:
+                    cur_idle = list(best_found_idle)
 
-            return cur_a, cur_t
+            return cur_a, cur_t, cur_idle
 
         # ILS from best Phase-2 candidate
         ils_a = _a_from_p(best_placement)
-        ils_a, ils_t = _local_search(ils_a, best_time)
+        ils_a, ils_t, ils_idle = _local_search(ils_a, best_time, best_idle)
         if ils_t < best_time:
             best_time = ils_t
             best_placement = _p_from_a(ils_a)
@@ -322,13 +423,14 @@ class Executor:
         no_improve = 0
         for kick in range(local_search_rounds * 5):
             n = random.randint(3, max(5, num_stages // 4))
-            pa = _perturb(ils_a, n)
-            pt = _sim(pa)
-            na, nt = _local_search(pa, pt)
+            pa = (_perturb_loose_balance(ils_a, n) if kick % 2 == 1
+                  else _perturb(ils_a, n))
+            pt, idle_pa = _sim(pa)
+            na, nt, n_idle = _local_search(pa, pt, idle_pa)
             if nt < best_time:
                 best_time = nt
                 best_placement = _p_from_a(na)
-                ils_a, ils_t = na, nt
+                ils_a, ils_t, ils_idle = na, nt, n_idle
                 sim_cap = int(best_time * 2)
                 no_improve = 0
                 print(f"[Phase 3] Kick {kick}: T={best_time}")
@@ -340,8 +442,8 @@ class Executor:
         # Random restarts from different basins
         for ri in range(min(5, local_search_rounds)):
             ra = _random_adj()
-            rt = _sim(ra)
-            oa, ot = _local_search(ra, rt)
+            rt, idle_ra = _sim(ra)
+            oa, ot, o_idle = _local_search(ra, rt, idle_ra)
             if ot < best_time:
                 best_time = ot
                 best_placement = _p_from_a(oa)
@@ -349,12 +451,14 @@ class Executor:
                 print(f"[Phase 3] Random {ri}: T={best_time}")
             for kick in range(3):
                 n = random.randint(3, max(5, num_stages // 4))
-                pa = _perturb(oa, n)
-                pt = _sim(pa)
-                na, nt = _local_search(pa, pt)
+                pa = (_perturb_loose_balance(oa, n) if kick % 2 == 1
+                      else _perturb(oa, n))
+                pt, idle_pa = _sim(pa)
+                na, nt, n_idle = _local_search(pa, pt, idle_pa)
                 if nt < best_time:
                     best_time = nt
                     best_placement = _p_from_a(na)
+                    oa, o_idle = na, n_idle
                     sim_cap = int(best_time * 2)
                     print(f"[Phase 3] Random {ri} kick {kick}: "
                           f"T={best_time}")

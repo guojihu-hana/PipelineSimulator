@@ -153,7 +153,7 @@ def main():
     else:
         chunk_num = 1
 
-    vocab_parallel = False if schedule_method == Schedule.OctoPipe else False
+    vocab_parallel = True if schedule_method == Schedule.OctoPipe else False
     arch = gpc.get("ARCH")
     f_times = preprocess_head_times(gpc["F_TIMES"], arch, vocab_parallel=vocab_parallel)
     b_times = preprocess_head_times(gpc["B_TIMES"], arch, vocab_parallel=vocab_parallel)

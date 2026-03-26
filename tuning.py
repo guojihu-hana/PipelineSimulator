@@ -409,19 +409,29 @@ def solve_placement_guided(
     beam_width: int = 512,
     top_n: int = 200,
     normalize_equal_cost_blocks: bool = True,
+    load_relax_for_layout: float = 0.06,
+    balance_break_tries: int = 200,
 ):
     """
     Guided placement solver using a fast OctoPipe scheduling estimator.
 
+    Search follows the heuristic: pipeline time is driven by the slowest
+    device, so candidates are ordered primarily by **min–max per-device
+    compute** (sum of F+B over stages on each device), then by the fast
+    scheduling estimator to refine **layout** under that load shape.
+
     Strategy:
       1) Build per-stage F/B times from partition + layer times.
       2) Generate diverse candidate placements:
-         a) All 24 device-permutations of the interleaved pattern.
+         a) All permutations of the interleaved base (small D).
          b) Interleaved + targeted swaps of outlier stages.
-         c) Cost-aware constructive beam search.
+         c) Constructive beam search pruning by **min partial max-load**.
          d) Random adjacency-satisfying placements.
-      3) Rank all candidates by the fast scheduling estimator.
-      4) Return top-N for simulation evaluation.
+         e) Interleaved + random multi-swaps.
+         f) Random swaps from near–load-optimal assignments, allowing up to
+            ``load_relax_for_layout`` relative slack on max device compute
+            to explore layout while slightly breaking perfect balance.
+      3) Rank by (max_device_compute, fast_estimator); return top-N.
 
     Returns:
       placements_list, estimated_times, stage_f_times, stage_b_times
@@ -444,6 +454,13 @@ def solve_placement_guided(
 
     def _adj_ok(a):
         return all(a[k] != a[k - 1] for k in range(1, num_stages))
+
+    def _max_device_compute(assigned):
+        """Bottleneck device compute: max_d sum_{s on d} (F_s + B_s)."""
+        load = [0.0] * num_pp
+        for s, d in enumerate(assigned):
+            load[d] += stage_f[s] + stage_b[s]
+        return max(load)
 
     def _place_from_assigned(a):
         p = [[] for _ in range(num_pp)]
@@ -498,14 +515,15 @@ def solve_placement_guided(
                 new_a = assigned[:]
                 new_a[sid] = d
                 next_beam.append(new_a)
-        # Prune: keep only top-K by partial load balance
+        # Prune: keep partial assignments with smallest partial max-load
+        # (bottleneck compute), matching the primary tuning objective.
         def _partial_score(a):
             load = [0.0] * num_pp
             for s in range(sid + 1):
                 load[a[s]] += stage_f[s] + stage_b[s]
-            return max(load) - min(l for l in load if l > 0 or sid < num_pp)
+            return max(load)
         next_beam.sort(key=_partial_score)
-        cbeam = next_beam[:min(24, beam_width // 8)]
+        cbeam = next_beam[:min(48, beam_width // 6)]
     for a in cbeam:
         if -1 not in a and _adj_ok(a):
             _add(a)
@@ -537,16 +555,38 @@ def solve_placement_guided(
     if not candidates:
         raise RuntimeError("No feasible candidates generated.")
 
-    # --- Rank by fast scheduling estimator ---
+    # --- Strategy F: layout diversity with slight load imbalance ---
+    if num_stages >= 2:
+        m_star = min(_max_device_compute(a) for a in candidates)
+        cap = m_star * (1.0 + float(load_relax_for_layout))
+        tol = max(m_star * 1e-5, 1e-9)
+        near_opt = [a for a in candidates if _max_device_compute(a) <= m_star + tol]
+        random.shuffle(near_opt)
+        bases = near_opt[: min(30, len(near_opt))]
+        if not bases:
+            bases = candidates[: min(10, len(candidates))]
+        tries_per_base = max(1, balance_break_tries // max(1, len(bases)))
+        for base in bases:
+            for _ in range(tries_per_base):
+                a = base[:]
+                s1, s2 = random.sample(range(num_stages), 2)
+                a[s1], a[s2] = a[s2], a[s1]
+                if not _adj_ok(a):
+                    continue
+                if _max_device_compute(a) <= cap:
+                    _add(a)
+
+    # --- Rank: (1) min max-device compute, (2) fast scheduling estimate ---
     scored = []
     for a in candidates:
+        mx = _max_device_compute(a)
         est = fast_octopipe_estimate(a, stage_f, stage_b, num_mb, num_pp)
-        scored.append((est, a))
-    scored.sort(key=lambda x: x[0])
+        scored.append((mx, est, a))
+    scored.sort(key=lambda x: (x[0], x[1]))
 
     # --- Return top-N ---
     results = []
-    for est, a in scored[:top_n]:
+    for mx, est, a in scored[:top_n]:
         place = _place_from_assigned(a)
         if normalize_equal_cost_blocks:
             stage_comp_times = [sf + sb for sf, sb in zip(stage_f, stage_b)]
