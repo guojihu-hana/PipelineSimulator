@@ -147,31 +147,40 @@ class Executor:
         idle0 = list(self.pipelines[0].get_device_bubble_time())
         return T, idle0
 
-    def iterative_tuning(self, iter_limit=100, time_limit=gpc["TIME_LIMIT"],
-                         placement=None, partition=None, verbose=False,
-                         beam_width=1024, top_n=200, local_search_rounds=3,
-                         sim_k=64, ls_neighbor_cap=512):
+    def iterative_tuning(
+            self,
+            iter_limit=100,
+            time_limit=gpc["TIME_LIMIT"],
+            placement=None,
+            partition=None,
+            verbose=False,
+            beam_width=1024,
+            top_n=200,
+            local_search_rounds=3,
+            sim_k=64,
+            ls_neighbor_cap=512,
+            *,
+            load_relax_for_layout=0.06,
+            balance_break_tries=200,
+            sim_cap_multiplier=2,
+            ls_full_sim_top_k_min=3,
+            ls_full_sim_top_k_max=15,
+            ls_full_sim_top_k_divisor=10,
+            bubble_heuristic_static_scale=0.25,
+            ils_kick_multiplier=5,
+            ils_patience=5,
+            ils_random_restarts=None,
+            ils_random_restart_kicks=3,
+            perturb_loose_balance_slack=0.07,
+            perturb_swap_min=3,
+            perturb_swap_max=None,
+            perturb_swap_max_floor=5,
+            perturb_swap_stage_divisor=4,
+    ):
         """
         Three-phase placement optimiser for OctoPipe scheduling (single-threaded).
 
-        Phase 1 — Candidate generation ranks primarily by **min–max per-device
-                  compute** (layer/stage load balance), then by the fast
-                  OctoPipe estimator for **layout**; includes placements that
-                  slightly relax balance to explore more schedules.
-        Phase 2 — Simulation evaluation of top-``sim_k`` candidates
-        Phase 3 — ILS with two-tier local search: neighbours are ranked by
-                  max-device static compute, fast estimate, then a **bubble
-                  heuristic** (last sim's per-device idle vs makespan and
-                  static F+B per device) so swaps/moves that shift work toward
-                  high-bubble, low-compute devices are tried first; when
-                  ``ls_neighbor_cap`` applies, the same heuristic picks which
-                  neighbours enter the pool. Perturbation kicks and random
-                  restarts unchanged aside from using the richer sim return.
-
-        ``ls_neighbor_cap`` limits how many swap/transfer neighbours are
-        scored with the fast estimator per local-search round (large models
-        can have >1k neighbours); beyond the cap, a random subset is used.
-        Pass ``None`` for no cap (slowest, exhaustive neighbour scan).
+        Tunables are documented on ``__main__.py`` (OctoPipe tuning block).
         """
         import time as _time
 
@@ -193,6 +202,8 @@ class Executor:
         guided_plas, est_times, stage_f, stage_b = solve_placement_guided(
             partition, placement, layer_f, layer_b,
             num_mb=num_mb, beam_width=beam_width, top_n=top_n,
+            load_relax_for_layout=load_relax_for_layout,
+            balance_break_tries=balance_break_tries,
         )
         print(f"[Phase 1] {len(guided_plas)} candidates, "
               f"best est={est_times[0]}  ({_time.time()-t0:.1f}s)")
@@ -216,7 +227,7 @@ class Executor:
 
         # Adaptive simulation cap: no need to fully simulate placements
         # that are clearly worse than the current best.
-        sim_cap = int(best_time * 2)
+        sim_cap = int(best_time * sim_cap_multiplier)
 
         # ----------------------------------------------------------
         # Phase 3: ILS
@@ -251,8 +262,9 @@ class Executor:
             if mx <= 0:
                 mx = 1.0
             # High bubble / low static → want to assign more comp here.
+            scale = bubble_heuristic_static_scale
             pressure = [
-                bubble[d] - 0.25 * (static_ld[d] / mx)
+                bubble[d] - scale * (static_ld[d] / mx)
                 for d in range(num_pp)
             ]
             diffs = [s for s in range(num_stages) if cur_a[s] != na[s]]
@@ -310,7 +322,7 @@ class Executor:
                     b[s1], b[s2] = b[s2], b[s1]
             return b if _adj_ok(b) else a
 
-        def _perturb_loose_balance(a, n, slack=0.07):
+        def _perturb_loose_balance(a, n, slack=perturb_loose_balance_slack):
             """Random swaps that may worsen max-device compute by up to ``slack``."""
             if num_stages < 2:
                 return a
@@ -338,6 +350,14 @@ class Executor:
 
         def _fe(a):
             return fast_octopipe_estimate(a, _sf, _sb, num_mb, num_pp)
+
+        def _perturb_swap_count():
+            hi = (perturb_swap_max if perturb_swap_max is not None
+                  else max(perturb_swap_max_floor,
+                           num_stages // max(1, perturb_swap_stage_divisor)))
+            if hi < perturb_swap_min:
+                hi = perturb_swap_min
+            return random.randint(perturb_swap_min, hi)
 
         def _local_search(start_a, start_t, start_idle=None,
                           rounds=local_search_rounds):
@@ -386,7 +406,11 @@ class Executor:
                 # Lower max-device compute, lower fast est, then higher
                 # bubble-guided benefit (shift work to high-bubble devices).
                 estimates = [_fe(a) for a in nbr_assigns]
-                top_k = max(3, min(15, len(estimates) // 10))
+                div = max(1, ls_full_sim_top_k_divisor)
+                top_k = max(
+                    ls_full_sim_top_k_min,
+                    min(ls_full_sim_top_k_max, len(estimates) // div),
+                )
                 top_idx = heapq.nsmallest(
                     top_k, range(len(nbr_assigns)),
                     key=lambda i: (max_loads[i], estimates[i], -benefits[i]))
@@ -416,13 +440,17 @@ class Executor:
         if ils_t < best_time:
             best_time = ils_t
             best_placement = _p_from_a(ils_a)
-            sim_cap = int(best_time * 2)
+            sim_cap = int(best_time * sim_cap_multiplier)
         print(f"[Phase 3] After local search: T={best_time}")
+
+        ils_kick_total = max(0, local_search_rounds * ils_kick_multiplier)
+        ils_rr = (ils_random_restarts if ils_random_restarts is not None
+                  else min(5, local_search_rounds))
 
         # Perturbation kicks
         no_improve = 0
-        for kick in range(local_search_rounds * 5):
-            n = random.randint(3, max(5, num_stages // 4))
+        for kick in range(ils_kick_total):
+            n = _perturb_swap_count()
             pa = (_perturb_loose_balance(ils_a, n) if kick % 2 == 1
                   else _perturb(ils_a, n))
             pt, idle_pa = _sim(pa)
@@ -431,26 +459,26 @@ class Executor:
                 best_time = nt
                 best_placement = _p_from_a(na)
                 ils_a, ils_t, ils_idle = na, nt, n_idle
-                sim_cap = int(best_time * 2)
+                sim_cap = int(best_time * sim_cap_multiplier)
                 no_improve = 0
                 print(f"[Phase 3] Kick {kick}: T={best_time}")
             else:
                 no_improve += 1
-                if no_improve >= 5:
+                if no_improve >= ils_patience:
                     break
 
         # Random restarts from different basins
-        for ri in range(min(5, local_search_rounds)):
+        for ri in range(ils_rr):
             ra = _random_adj()
             rt, idle_ra = _sim(ra)
             oa, ot, o_idle = _local_search(ra, rt, idle_ra)
             if ot < best_time:
                 best_time = ot
                 best_placement = _p_from_a(oa)
-                sim_cap = int(best_time * 2)
+                sim_cap = int(best_time * sim_cap_multiplier)
                 print(f"[Phase 3] Random {ri}: T={best_time}")
-            for kick in range(3):
-                n = random.randint(3, max(5, num_stages // 4))
+            for kick in range(ils_random_restart_kicks):
+                n = _perturb_swap_count()
                 pa = (_perturb_loose_balance(oa, n) if kick % 2 == 1
                       else _perturb(oa, n))
                 pt, idle_pa = _sim(pa)
@@ -459,7 +487,7 @@ class Executor:
                     best_time = nt
                     best_placement = _p_from_a(na)
                     oa, o_idle = na, n_idle
-                    sim_cap = int(best_time * 2)
+                    sim_cap = int(best_time * sim_cap_multiplier)
                     print(f"[Phase 3] Random {ri} kick {kick}: "
                           f"T={best_time}")
 

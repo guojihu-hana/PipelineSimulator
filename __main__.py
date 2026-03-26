@@ -1,7 +1,6 @@
 import random
 import cProfile
 import pstats
-from re import T
 from simulator.abstract.mutils import TrainingConfig
 from simulator.abstract.variables import Schedule
 from simulator.abstract.context import (
@@ -153,7 +152,7 @@ def main():
     else:
         chunk_num = 1
 
-    vocab_parallel = True if schedule_method == Schedule.OctoPipe else False
+    vocab_parallel = False if schedule_method == Schedule.OctoPipe else False
     arch = gpc.get("ARCH")
     f_times = preprocess_head_times(gpc["F_TIMES"], arch, vocab_parallel=vocab_parallel)
     b_times = preprocess_head_times(gpc["B_TIMES"], arch, vocab_parallel=vocab_parallel)
@@ -191,20 +190,106 @@ def main():
     iter_tuning = True if schedule_method == Schedule.OctoPipe else False
     gpc["PROFILE_GENERATION"] = True
     if iter_tuning:
+        # ------------------------------------------------------------------
+        # OctoPipe placement search — all knobs for Executor.iterative_tuning
+        # (Phase 1–3). Larger search ≈ longer runtime.
+        # ------------------------------------------------------------------
+        # Phase 1: candidate generation (fast estimator + balance heuristics)
+        # Micro-batch count for the fast estimator is tc.micro_batch_num (TrainingConfig above).
+        tune_beam_width = 4096
+        # Caps random strategies B/D/E inside tuning.solve_placement_guided (min with 200/300).
+        tune_top_n = 2048
+        # After ranking, keep this many distinct placements for Phase 2 list head.
+        tune_load_relax_for_layout = 0.06
+        # Strategy F: allow max-device static compute up to (1+this)×global min to add layout diversity.
+        tune_balance_break_tries = 400
+        # Total random swap attempts from near–load-optimal bases (spread across bases).
+
+        # Phase 2: full simulator on first tune_sim_k placements from Phase 1.
+        tune_sim_k = 256
+
+        # Phase 3: neighbour pool / local search
+        tune_local_search_rounds = 3
+        # Hill-climb rounds per _local_search call.
+        tune_ls_neighbor_cap = None
+        # Max neighbours scored with fast estimator per round; None = use all (slowest, broadest).
+        tune_ls_full_sim_top_k_min = 3
+        tune_ls_full_sim_top_k_max = 15
+        tune_ls_full_sim_top_k_divisor = 10
+        # Full sim on top_k neighbours: top_k = max(min, min(max, len//divisor)).
+        tune_bubble_heuristic_static_scale = 0.25
+        # Bubble layout score: pressure = bubble_ratio - scale×(static_load/max_static).
+
+        # Phase 3: adaptive sim truncation (also after each new global best)
+        tune_sim_cap_multiplier = 5
+        # sim_cap = best_T × multiplier; placements worse than cap can stop early.
+
+        # Phase 3: ILS kicks & random restarts
+        tune_ils_kick_multiplier = 5
+        # Number of main kicks ≈ tune_local_search_rounds × this.
+        tune_ils_patience = 5
+        # Stop kicking after this many consecutive kicks without improving best_T.
+        tune_ils_random_restarts = None
+        # Random adjacency restarts; None = min(5, tune_local_search_rounds).
+        tune_ils_random_restart_kicks = 3
+        # Extra kicks after each random restart basin.
+
+        tune_perturb_loose_balance_slack = 0.07
+        # Alternate kick: random swaps may raise max-device static load by up to this fraction.
+        tune_perturb_swap_min = 3
+        tune_perturb_swap_max = None
+        # If None: max swaps = max(tune_perturb_swap_max_floor, num_stages // tune_perturb_swap_stage_divisor).
+        tune_perturb_swap_max_floor = 5
+        tune_perturb_swap_stage_divisor = 4
+
+        # Misc
+        tune_time_limit = gpc["TIME_LIMIT"]
+        # Single full-simulation step limit (Phase 2 and final one_step_tuning).
+        tune_iter_limit = 100
+        # Reserved (legacy API); new three-phase tuner does not loop on this.
+
+        tune_kw = dict(
+            iter_limit=tune_iter_limit,
+            time_limit=tune_time_limit,
+            beam_width=tune_beam_width,
+            top_n=tune_top_n,
+            local_search_rounds=tune_local_search_rounds,
+            sim_k=tune_sim_k,
+            ls_neighbor_cap=tune_ls_neighbor_cap,
+            load_relax_for_layout=tune_load_relax_for_layout,
+            balance_break_tries=tune_balance_break_tries,
+            sim_cap_multiplier=tune_sim_cap_multiplier,
+            ls_full_sim_top_k_min=tune_ls_full_sim_top_k_min,
+            ls_full_sim_top_k_max=tune_ls_full_sim_top_k_max,
+            ls_full_sim_top_k_divisor=tune_ls_full_sim_top_k_divisor,
+            bubble_heuristic_static_scale=tune_bubble_heuristic_static_scale,
+            ils_kick_multiplier=tune_ils_kick_multiplier,
+            ils_patience=tune_ils_patience,
+            ils_random_restarts=tune_ils_random_restarts,
+            ils_random_restart_kicks=tune_ils_random_restart_kicks,
+            perturb_loose_balance_slack=tune_perturb_loose_balance_slack,
+            perturb_swap_min=tune_perturb_swap_min,
+            perturb_swap_max=tune_perturb_swap_max,
+            perturb_swap_max_floor=tune_perturb_swap_max_floor,
+            perturb_swap_stage_divisor=tune_perturb_swap_stage_divisor,
+        )
+
         if schedule_method == Schedule.OctoPipe:
             partition = [1 for _ in range(gpc["LAYER_NUM"])]
             placement = [[i + j * gpc["DEVICE_NUM"] for j in range(gpc["LAYER_NUM"]//gpc["DEVICE_NUM"]) ] for i in range(gpc["DEVICE_NUM"])]
             if gpc["PROFILE_GENERATION"]:
                 profiler = cProfile.Profile()
                 profiler.enable()
-                executor.iterative_tuning(iter_limit=100, beam_width=1024, top_n=2048, placement=placement, partition=partition, verbose=True, sim_k=64, ls_neighbor_cap=None)
+                executor.iterative_tuning(
+                    placement=placement, partition=partition, verbose=True, **tune_kw)
                 profiler.disable()
 
                 stats = pstats.Stats(profiler).sort_stats("cumtime")
                 stats.print_stats(20)  # 打印前 10 个耗时函数
             else:
                 # tune_strategy 0: octopipe, 1:random, 2:dfs
-                executor.iterative_tuning(iter_limit=100, beam_width=1024, top_n=2048, placement=placement, partition=partition, verbose=True, sim_k=64, ls_neighbor_cap=None)
+                executor.iterative_tuning(
+                    placement=placement, partition=partition, verbose=True, **tune_kw)
         else:
             executor.run_all_dp()
     else:
