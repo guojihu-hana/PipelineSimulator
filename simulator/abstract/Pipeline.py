@@ -479,21 +479,24 @@ class PipelineScheduler:
 
     def check_workload_status(self, time):
         for device in self.devices:
-            if device.state == Device.BUSY and time >= device.current_workload.end_time:
-                if device.current_workload.wtype == WorkloadType.W:
-                    if device.current_workload.sid < self.stage_num:
+            if device.state != Device.BUSY:
+                continue
+            if time < device.current_workload.end_time:
+                continue
+            if device.current_workload.wtype == WorkloadType.W:
+                if device.current_workload.sid < self.stage_num:
+                    self.num_finished_microbatch += 1
+            elif not self.bwd_split and device.current_workload.wtype == WorkloadType.B:
+                if device.current_workload.sid < self.stage_num:
+                    if device.current_workload.duration > 0:
                         self.num_finished_microbatch += 1
-                elif not self.bwd_split and device.current_workload.wtype == WorkloadType.B:
-                    if device.current_workload.sid < self.stage_num:
-                        if device.current_workload.duration > 0:
-                            self.num_finished_microbatch += 1
-                self.workload_execute_record[device.current_workload.did].append(device.current_workload)
+            self.workload_execute_record[device.current_workload.did].append(device.current_workload)
 
-                device.current_workload.complete(time=time)
-                device.finish_time = time
-                self.update_constraints_within_pipeline(time=time, constraint=device.current_workload)
-                device.update_memory_usage()
-                device.state = Device.IDLE
+            device.current_workload.complete(time=time)
+            device.finish_time = time
+            self.update_constraints_within_pipeline(time=time, constraint=device.current_workload)
+            device.update_memory_usage()
+            device.state = Device.IDLE
 
     def execute_workload(self, time):
         for device in self.devices:

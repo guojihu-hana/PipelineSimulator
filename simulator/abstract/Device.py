@@ -2,6 +2,11 @@ from .Stage import Stage, StageType
 from .Workload import Workload
 from .mutils import TrainingConfig
 from .variables import WorkloadType, Schedule, OrderedQueue
+
+# Full re-scan of stage mem/peak every N updates to bound FP drift
+# (incremental path uses round(..., 4); user-tolerated error ~1e-2).
+_MEM_AGG_RESYNC_INTERVAL = 512
+_MEM_AGG_ROUND = 4
 from ..config import (
     Activation, Gradient, ACT_B_RATIO, StateMemory, Parameter,
 )
@@ -25,6 +30,40 @@ def get_required_memory(stage_id, layer_num, wtype, recomp, stage_num, bwd_split
             if wtype == WorkloadType.B:
                 required_memory = (Gradient.INPUT + Gradient.PARAMETER - Activation.FULL) * layer_num
     return required_memory
+
+
+def _affected_stage_ids_for_constraint(stages: dict, constraint: Workload, bwd_split: bool):
+    """
+    Stage indices on this device that may need ``update_constraints_within_stage``
+    when ``constraint`` completes.  Matches the case logic in ``Stage.update_constraints_within_stage``
+    so we avoid scanning every stage on every cross-device notification.
+    """
+    c_sid = constraint.sid
+    c_wlt = constraint.wtype
+    Sm1 = constraint.total_stage_num - 1
+    out = []
+
+    if c_wlt == WorkloadType.F:
+        nxt = c_sid + 1
+        if nxt in stages:
+            out.append(nxt)
+        if c_sid == Sm1 and c_sid in stages:
+            out.append(c_sid)
+    elif c_wlt == WorkloadType.B:
+        prev = c_sid - 1
+        if prev >= 0 and prev in stages:
+            out.append(prev)
+        if bwd_split and c_sid in stages:
+            out.append(c_sid)
+    elif c_wlt == WorkloadType.R:
+        if c_sid in stages:
+            out.append(c_sid)
+    elif c_wlt == WorkloadType.W:
+        prev = c_sid - 1
+        if prev >= 0 and prev in stages:
+            out.append(prev)
+    return out
+
 
 class Device:
     
@@ -70,6 +109,10 @@ class Device:
         self.current_workload: Workload = None
         self.current_mem_usage: int = 0
         self.peak_memory_usage: int = 0
+        # tuple(self.stages.values()) built lazily; invalidated in add_stage.
+        self._stages_snapshot: tuple | None = None
+        self._device_mem_totals_seeded: bool = False
+        self._mem_agg_ticks: int = 0
         self.mid_offset: int = mid_offset
         self.held_mids: set = set(range(self.mid_offset, self.mid_offset + self.nmb))
         self.mem_usage_record: dict[int, int] = {}
@@ -286,7 +329,9 @@ class Device:
                 placement = self.placement,
             )
         self.stages[stage.sid] = stage
-        self.total_layers+=layer_num
+        self.total_layers += layer_num
+        self._stages_snapshot = None
+        self._device_mem_totals_seeded = False
 
     def count_wtype_num(self, did : int, wtype : WorkloadType):
         count = 0
@@ -299,18 +344,12 @@ class Device:
         # this device does not hold the micro-batch referenced by the constraint.
         if constraint.mid not in self.held_mids:
             return
-        for sid in self.stages:
-            updated_workload = self.stages[sid].update_constraints_within_stage(time, constraint=constraint)
+        for sid in _affected_stage_ids_for_constraint(
+                self.stages, constraint, self.bwd_split):
+            updated_workload = self.stages[sid].update_constraints_within_stage(
+                time, constraint=constraint)
             if updated_workload and updated_workload.is_executable(time):
                 self.executable_workloads.push(updated_workload)
-    
-    def update_mid_traverse_order(self,mid=None):
-        if type(self.mid_traverse_order) is not list:
-            self.mid_traverse_order = list(self.mid_traverse_order)
-        self.mid_traverse_order.sort()
-        if mid:
-            self.mid_traverse_order.remove(mid)
-            self.mid_traverse_order.append(mid)
     
     def get_completed_workload_count_by_type(self, wtype:WorkloadType):
         workload_num = 0
@@ -549,17 +588,57 @@ class Device:
         return workload_type
 
     def update_memory_usage(self) -> int:
-        if self.current_workload.state == Workload.in_progress and self.current_workload.wtype in (WorkloadType.F, WorkloadType.R, WorkloadType.B):
-            self.stages[self.current_workload.sid].update_memory_usage(workload=self.current_workload)
-        elif self.current_workload.state == Workload.finished and self.current_workload.wtype == WorkloadType.W:
-            self.stages[self.current_workload.sid].update_memory_usage(workload=self.current_workload)
-        self.peak_memory_usage = sum(stage.peak_memory_usage for stage in self.stages.values())    
-        self.current_mem_usage = sum(stage.memory_usage for stage in self.stages.values())
-        self.mem_usage_record[(self.current_workload.start_time,self.current_workload.end_time)] = self.current_mem_usage
-        self.peak_mem_usage_record[(self.current_workload.start_time,self.current_workload.end_time)] = (self.peak_memory_usage, self.current_workload.wtype.name, self.current_workload.sid, self.current_workload.mid)
-        for stage in self.stages.values(): # recover peak memory usage to current memory usage
-            if stage.sid != self.current_workload.sid:
+        cw = self.current_workload
+        sid_cur = cw.sid
+        st_cur = self.stages[sid_cur]
+        mem_b = st_cur.memory_usage
+        peak_b = st_cur.peak_memory_usage
+
+        if cw.state == Workload.in_progress and cw.wtype in (WorkloadType.F, WorkloadType.R, WorkloadType.B):
+            st_cur.update_memory_usage(workload=cw)
+        elif cw.state == Workload.finished and cw.wtype == WorkloadType.W:
+            st_cur.update_memory_usage(workload=cw)
+
+        mem_a = st_cur.memory_usage
+        peak_a = st_cur.peak_memory_usage
+
+        # Per-stage accounting still runs above; device-level sums and trace dicts
+        # are only needed when save_memory affects scheduling or for mem reports.
+        if not self.tc.save_memory:
+            return self.current_mem_usage
+
+        if self._stages_snapshot is None:
+            self._stages_snapshot = tuple(self.stages.values())
+        snap = self._stages_snapshot
+
+        self._mem_agg_ticks += 1
+        resync = (
+            not self._device_mem_totals_seeded
+            or self._mem_agg_ticks % _MEM_AGG_RESYNC_INTERVAL == 0
+        )
+        r = _MEM_AGG_ROUND
+        if resync:
+            cm = pk = 0.0
+            for stage in snap:
+                cm += stage.memory_usage
+                pk += stage.peak_memory_usage
+            self.current_mem_usage = round(cm, r)
+            self.peak_memory_usage = round(pk, r)
+            self._device_mem_totals_seeded = True
+        else:
+            self.current_mem_usage = round(
+                self.current_mem_usage + (mem_a - mem_b), r)
+            self.peak_memory_usage = round(
+                self.peak_memory_usage + (peak_a - peak_b), r)
+
+        self.mem_usage_record[(cw.start_time, cw.end_time)] = self.current_mem_usage
+        self.peak_mem_usage_record[(cw.start_time, cw.end_time)] = (
+            self.peak_memory_usage, cw.wtype.name, cw.sid, cw.mid)
+        for stage in snap:
+            if stage.sid != sid_cur:
                 stage.peak_memory_usage = stage.memory_usage
+
+        return self.current_mem_usage
 
     def get_memory_usage(self) -> int:
         return self.current_mem_usage
